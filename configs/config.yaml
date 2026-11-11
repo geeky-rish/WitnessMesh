@@ -1,0 +1,82 @@
+# WitnessMesh Configuration
+
+# Transparency Log
+log:
+  # Ed25519 private key in hex (auto-generated if not provided)
+  private_key: ""
+  # Listen address for log HTTP server
+  listen: ":8081"
+  # Enable malicious mode for attack simulation
+  malicious: false
+
+# Witnesses
+witnesses:
+  - name: "witness-0"
+    # Ed25519 private key in hex (auto-generated if not provided)
+    private_key: ""
+    listen: ":8082"
+    # Log public keys this witness trusts (hex)
+    trusted_logs: []
+  - name: "witness-1"
+    private_key: ""
+    listen: ":8083"
+    trusted_logs: []
+  - name: "witness-2"
+    private_key: ""
+    listen: ":8084"
+    trusted_logs: []
+
+# Clients
+clients:
+  - name: "client-0"
+    # Trust policy for this client
+    policy: "default"
+  - name: "client-1"
+    policy: "default"
+
+# Monitor
+monitor:
+  # Polling interval
+  interval: "10s"
+  # Log endpoints to monitor
+  log_endpoints:
+    - "http://localhost:8081"
+  # Witness endpoints to query
+  witness_endpoints:
+    - "http://localhost:8082"
+    - "http://localhost:8083"
+    - "http://localhost:8084"
+
+# Trust Policy
+policy:
+  # Quorum type: "k_of_n" or "tree"
+  quorum_type: "k_of_n"
+  # For k_of_n: number of witnesses required
+  k: 2
+  # Witnesses in the quorum (by name)
+  witnesses:
+    - "witness-0"
+    - "witness-1"
+    - "witness-2"
+  # Logs to trust (by public key hash)
+  logs: []
+
+# Storage
+storage:
+  # SQLite database path
+  path: "data/witnessmesh.db"
+
+# Dashboard
+dashboard:
+  listen: ":8080"
+  # Enable attack laboratory
+  attack_lab: true
+
+# Attack Simulation
+attack:
+  # Network namespace for isolation (requires root)
+  use_namespaces: false
+  # Network delay in ms (for netem)
+  network_delay_ms: 100
+  # Packet loss percentage
+  packet_loss_percent: 0

@@ -1,0 +1,125 @@
+version: '3.8'
+
+services:
+  # Transparency Log
+  log:
+    build: .
+    command: ["-mode", "log", "-listen", ":8081"]
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+    networks:
+      - witnessmesh
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8081/tree-head"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Witness 0
+  witness-0:
+    build: .
+    command: ["-mode", "witness", "-listen", ":8082", "-name", "witness-0", "-log", "http://log:8081"]
+    ports:
+      - "8082:8082"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+    networks:
+      - witnessmesh
+    depends_on:
+      log:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Witness 1
+  witness-1:
+    build: .
+    command: ["-mode", "witness", "-listen", ":8083", "-name", "witness-1", "-log", "http://log:8081"]
+    ports:
+      - "8083:8083"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+    networks:
+      - witnessmesh
+    depends_on:
+      log:
+        condition: service_healthy
+
+  # Witness 2
+  witness-2:
+    build: .
+    command: ["-mode", "witness", "-listen", ":8084", "-name", "witness-2", "-log", "http://log:8081"]
+    ports:
+      - "8084:8084"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+    networks:
+      - witnessmesh
+    depends_on:
+      log:
+        condition: service_healthy
+
+  # Dashboard / Demo orchestrator
+  dashboard:
+    build: .
+    command: ["-mode", "demo", "-listen", ":8080"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+    networks:
+      - witnessmesh
+    depends_on:
+      log:
+        condition: service_healthy
+      witness-0:
+        condition: service_healthy
+      witness-1:
+        condition: service_healthy
+      witness-2:
+        condition: service_healthy
+
+  # Attack simulator (run on demand)
+  attacker:
+    build: .
+    command: ["-mode", "attack", "-attack", "split-view"]
+    volumes:
+      - ./data:/app/data
+      - ./configs:/app/configs
+    networks:
+      - witnessmesh
+    profiles:
+      - attack
+    depends_on:
+      - log
+      - witness-0
+      - witness-1
+      - witness-2
+
+  # Verifier (run on demand)
+  verifier:
+    build: .
+    command: ["-mode", "verify", "-evidence", "/app/data/evidence.json"]
+    volumes:
+      - ./data:/app/data
+    networks:
+      - witnessmesh
+    profiles:
+      - verify
+
+networks:
+  witnessmesh:
+    driver: bridge
+
+volumes:
+  witnessmesh-data:
