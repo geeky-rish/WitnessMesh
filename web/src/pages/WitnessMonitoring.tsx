@@ -205,6 +205,10 @@ export function WitnessMonitoring() {
               </tbody>
             </table>
           </div>
+          <div className="mt-3 pt-3 border-t border-[#DCE1E5] flex justify-between items-center text-xs text-[#75818A]">
+            <span>C2SP tlog-witness protocol synchronization</span>
+            <span className="font-mono text-[11px]">witness mesh: <a href="https://github.com/geeky-rish" target="_blank" rel="noopener noreferrer" className="hover:text-[#328C89]">@geeky-rish</a></span>
+          </div>
         </div>
       </Card>
     </div>

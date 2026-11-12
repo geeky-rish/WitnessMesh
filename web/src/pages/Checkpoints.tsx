@@ -182,8 +182,9 @@ export function Checkpoints() {
 
       {/* Merkle Tree Visualization */}
       <Card>
-        <div className="card-header">
+        <div className="card-header flex items-center justify-between">
           <h3 className="font-medium text-[#233746]">Merkle Tree Structure (Latest Checkpoint)</h3>
+          <span className="text-xs text-[#75818A] font-mono">tree verifier: <a href="https://github.com/geeky-rish" target="_blank" rel="noopener noreferrer" className="text-[#328C89] hover:underline">@geeky-rish</a></span>
         </div>
         <div className="card-body">
           <div className="font-mono text-xs bg-[#1E293B] text-[#E8EDF1] p-4 rounded overflow-x-auto">

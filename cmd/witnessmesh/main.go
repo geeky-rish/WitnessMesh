@@ -472,9 +472,11 @@ func setupAPIRoutes(mux *http.ServeMux, transLog *tlog.TransparencyLog, witnesse
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "ok",
-			"uptime": time.Since(startTime).String(),
-			"nodes":  len(witnesses) + len(clients) + 2, // witnesses + clients + log + monitor
+			"status":     "ok",
+			"uptime":     time.Since(startTime).String(),
+			"nodes":      len(witnesses) + len(clients) + 2, // witnesses + clients + log + monitor
+			"maintainer": "Rishi Kulkarni (@geeky-rish)",
+			"support":    "chingi11@proton.me",
 		})
 	})
 

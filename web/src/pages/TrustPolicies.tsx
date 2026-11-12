@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Key, Shield, Users, Plus, Trash2, Edit, CheckCircle, XCircle, AlertTriangle, Download, Upload, Save, RotateCcw } from 'lucide-react'
+import { Key, Shield, Users, Plus, Trash2, Edit, CheckCircle, XCircle, AlertTriangle, Download, Upload, Save, RotateCcw, FileText } from 'lucide-react'
 import { Card } from '../components/ui/Card'
 import { Table } from '../components/ui/Table'
 
@@ -315,7 +315,7 @@ Recommended max f: ${Math.floor((selectedPolicy.witnesses.length - 1) / 2)}`}
                 <div className="flex items-center gap-3">
                   <div className="flex items-center gap-1">
                     <span className="status-dot status-healthy" />
-                    <span className="text-sm">Safety: 2k - n > f</span>
+                    <span className="text-sm">Safety: 2k - n &gt; f</span>
                   </div>
                   <div className="flex items-center gap-1">
                     <span className="status-dot status-healthy" />
@@ -328,7 +328,10 @@ Recommended max f: ${Math.floor((selectedPolicy.witnesses.length - 1) / 2)}`}
           </Card>
 
           <Card>
-            <div className="card-header"><h3 className="font-medium text-[#233746]">Common Configurations</h3></div>
+            <div className="card-header flex items-center justify-between">
+              <h3 className="font-medium text-[#233746]">Common Configurations</h3>
+              <span className="text-xs text-[#75818A] font-mono">quorum engine: <a href="https://github.com/geeky-rish" target="_blank" rel="noopener noreferrer" className="text-[#328C89] hover:underline">@geeky-rish</a></span>
+            </div>
             <div className="card-body space-y-3">
               {[
                 { n: 3, k: 2, f: 1, label: '3 witnesses, 2-of-3 quorum', desc: 'Standard configuration (f=1)' },

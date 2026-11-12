@@ -308,8 +308,12 @@ export function Overview() {
             </div>
             <div className="p-4 bg-[#F2F3F4] rounded-lg">
               <p className="text-xs text-[#75818A] mb-1">Byzantine Tolerance</p>
-              <p className="font-medium text-[#233746]">f = 1 (satisfies 2k - n > f: 4 - 3 > 1)</p>
+              <p className="font-medium text-[#233746]">f = 1 (satisfies 2k - n &gt; f: 4 - 3 &gt; 1)</p>
             </div>
+          </div>
+          <div className="mt-3 pt-3 border-t border-[#DCE1E5] flex justify-between items-center text-xs text-[#75818A]">
+            <span>Active cryptographic mesh verification</span>
+            <span className="font-mono text-[11px]">telemetry: <a href="https://github.com/geeky-rish" target="_blank" rel="noopener noreferrer" className="hover:text-[#328C89]">@geeky-rish</a></span>
           </div>
         </div>
       </Card>

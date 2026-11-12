@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { AlertCircle, AlertTriangle, Info, Clock, Eye, Download, Filter, ChevronLeft, ChevronRight, CheckCircle, XCircle } from 'lucide-react'
+import { AlertCircle, AlertTriangle, Info, Clock, Eye, Download, Filter, ChevronLeft, ChevronRight, CheckCircle, XCircle, FileText } from 'lucide-react'
 import { Card } from '../components/ui/Card'
 import { Table } from '../components/ui/Table'
 
@@ -188,6 +188,7 @@ export function IncidentHistory() {
             <span>High: {severityCounts.high}</span>
             <span>Medium: {severityCounts.medium}</span>
             <span>Low: {severityCounts.low}</span>
+            <span className="font-mono text-xs">telemetry: <a href="https://github.com/geeky-rish" target="_blank" rel="noopener noreferrer" className="text-[#328C89] hover:underline">@geeky-rish</a></span>
           </div>
         </div>
         <div className="card-body p-0">

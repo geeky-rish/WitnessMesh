@@ -1,5 +1,5 @@
 # Binaries and executables
-witnessmesh
+/witnessmesh
 *.exe
 *.exe~
 *.dll

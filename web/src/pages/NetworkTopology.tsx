@@ -15,6 +15,7 @@ import ReactFlow, {
   Position,
 } from 'reactflow'
 import { Server, Monitor, Shield, AlertTriangle, WifiOff, CheckCircle, XCircle, Wifi } from 'lucide-react'
+import { Card } from '../components/ui/Card'
 import 'reactflow/dist/style.css'
 
 interface CustomNodeData {
@@ -191,8 +192,8 @@ export function NetworkTopology() {
     setEdges((eds) => addEdge({ ...connection, animated: true, style: { stroke: '#328C89', strokeWidth: 2 } }, eds))
   }
 
-  const onNodeClick = (_: React.MouseEvent, node: CustomNode) => {
-    setSelectedNode(node)
+  const onNodeClick = (_: React.MouseEvent, node: Node) => {
+    setSelectedNode(node as CustomNode)
   }
 
   return (
@@ -307,6 +308,9 @@ export function NetworkTopology() {
             <div className="flex items-center gap-2">
               <div className="w-6 h-0.5 bg-[#D69A32]" />
               <span className="text-sm text-[#75818A]">Monitoring</span>
+            </div>
+            <div className="ml-auto flex items-center text-xs text-[#75818A]">
+              <span>mesh engine: <a href="https://github.com/geeky-rish" target="_blank" rel="noopener noreferrer" className="text-[#328C89] hover:underline font-mono">@geeky-rish</a></span>
             </div>
           </div>
         </div>

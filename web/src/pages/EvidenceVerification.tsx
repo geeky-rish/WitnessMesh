@@ -355,8 +355,9 @@ export function EvidenceVerification() {
 
       {/* Offline Verifier Help */}
       <Card>
-        <div className="card-header">
+        <div className="card-header flex items-center justify-between">
           <h3 className="font-medium text-[#233746]">Independent Offline Verifier</h3>
+          <span className="text-xs text-[#75818A] font-mono">standalone verifier: <a href="https://github.com/geeky-rish" target="_blank" rel="noopener noreferrer" className="text-[#328C89] hover:underline">@geeky-rish</a></span>
         </div>
         <div className="card-body">
           <p className="text-[#75818A] mb-4">The offline verifier is a standalone CLI tool that validates evidence bundles without trusting the monitoring service.</p>

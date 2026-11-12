@@ -3,11 +3,12 @@ import React from 'react'
 export interface CardProps {
   children: React.ReactNode
   className?: string
+  style?: React.CSSProperties
 }
 
-export function Card({ children, className = '' }: CardProps) {
+export function Card({ children, className = '', style }: CardProps) {
   return (
-    <div className={`card ${className}`}>
+    <div className={`card ${className}`} style={style}>
       {children}
     </div>
   )
@@ -16,7 +17,7 @@ export function Card({ children, className = '' }: CardProps) {
 export interface StatCardProps {
   label: string
   value: number | string
-  icon: React.ComponentType<{ className?: string }>
+  icon: React.ComponentType<{ className?: string; style?: React.CSSProperties }>
   color: string
   trend?: string
   trendColor?: string

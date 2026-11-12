@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import {
   Play,
-  Stop,
+  Square as Stop,
   RotateCcw,
   AlertTriangle,
   Shield,
@@ -129,6 +129,18 @@ export function AttackLab() {
     if (selectedAttack?.id === attack.id) {
       setEvents([])
     }
+  }
+
+  const downloadEvents = (attackId: string) => {
+    const attack = attacks.find(a => a.id === attackId)
+    const content = `Attack: ${attack?.name}\nEvents:\n${events.map(e => `[${e.timestamp}] ${e.source}: ${e.message}`).join('\n')}`
+    const blob = new Blob([content], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${attackId}-events.txt`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   const addEvent = (level: AttackEvent['level'], message: string, source: string) => {
@@ -311,19 +323,23 @@ export function AttackLab() {
 
       {/* Attack History / Results */}
       <Card>
-        <div className="card-header">
+        <div className="card-header flex items-center justify-between">
           <h3 className="font-medium text-[#233746]">Attack History</h3>
+          <span className="text-xs text-[#75818A] font-mono">suite author: <a href="https://github.com/geeky-rish" target="_blank" rel="noopener noreferrer" className="text-[#328C89] hover:underline">@geeky-rish</a></span>
         </div>
         <div className="card-body p-0">
           <Table
             data={attacks.filter(a => a.status !== 'idle')}
             columns={[
-              { key: 'name', header: 'Attack', render: (a: Attack) => (
-                <div className="flex items-center gap-2">
-                  <categoryIcons[a.category] className="w-4 h-4" style={{ color: categoryColors[a.category] }} />
-                  <span>{a.name}</span>
-                </div>
-              )},
+              { key: 'name', header: 'Attack', render: (a: Attack) => {
+                const IconComp = categoryIcons[a.category];
+                return (
+                  <div className="flex items-center gap-2">
+                    {IconComp && <IconComp className="w-4 h-4" style={{ color: categoryColors[a.category] }} />}
+                    <span>{a.name}</span>
+                  </div>
+                );
+              }},
               { key: 'status', header: 'Status', render: (a: Attack) => getStatusBadge(a.status) },
               { key: 'result', header: 'Result', render: (a: Attack) => (
                 <span className={`text-sm ${a.status === 'detected' || a.status === 'prevented' ? 'text-[#27865B]' : 'text-[#C74747]'}`}>
@@ -411,7 +427,7 @@ function getAttackSteps(attackId: string) {
   return steps
 }
 
-function simulateAttackResult(attackId: string) {
+function simulateAttackResult(attackId: string): { status: Attack['status']; message: string; evidenceId?: string } {
   switch (attackId) {
     case 'split-view':
       return { status: 'prevented', message: 'Honest witnesses rejected inconsistent checkpoints. Clients failed quorum verification.', evidenceId: undefined }
@@ -428,16 +444,4 @@ function simulateAttackResult(attackId: string) {
 
 function viewEvidence(evidenceId: string) {
   window.location.href = `/evidence?id=${evidenceId}`
-}
-
-function downloadEvents(attackId: string) {
-  const attack = attacks.find(a => a.id === attackId)
-  const content = `Attack: ${attack?.name}\nEvents:\n${events.map(e => `[${e.timestamp}] ${e.source}: ${e.message}`).join('\n')}`
-  const blob = new Blob([content], { type: 'text/plain' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `${attackId}-events.txt`
-  a.click()
-  URL.revokeObjectURL(url)
 }
