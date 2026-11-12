@@ -9,12 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	_ "github.com/mattn/go-sqlite3"
 	"gopkg.in/yaml.v3"
-	_ "modernc.org/sqlite"
 )
 
 // WitnessID uniquely identifies a witness in the mesh.
@@ -110,7 +111,7 @@ const (
 
 // CheckQuorum evaluates whether the current witness set satisfies the quorum policy.
 // Returns the status and the number of available (non-excluded) witnesses.
-func (q *QuorumPolicy) CheckQuorum(availableWitnesses int) (QuorumStatus, int) {
+func (q QuorumPolicy) CheckQuorum(availableWitnesses int) (QuorumStatus, int) {
 	if availableWitnesses < 0 {
 		availableWitnesses = 0
 	}
@@ -190,7 +191,7 @@ func NewPolicyEngine(config PolicyConfig, dbPath string, verifier EvidenceVerifi
 		return nil, fmt.Errorf("witness count (%d) does not match quorum n (%d)", len(config.Witnesses), config.Quorum.N)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -206,6 +207,22 @@ func NewPolicyEngine(config PolicyConfig, dbPath string, verifier EvidenceVerifi
 		evidenceVerifier: verifier,
 	}
 
+	// Check if database already has a persisted config
+	var savedConfigJSON string
+	err = db.QueryRow(`SELECT config_json FROM policy_config WHERE id = 1`).Scan(&savedConfigJSON)
+	if err == nil && savedConfigJSON != "" {
+		var persisted PolicyConfig
+		if jsonErr := json.Unmarshal([]byte(savedConfigJSON), &persisted); jsonErr == nil {
+			engine.config = persisted
+		}
+	} else {
+		// Persist initial config if database is empty
+		if err := engine.persistConfig(); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to persist initial config: %w", err)
+		}
+	}
+
 	// Load last hash from database for audit chain continuity
 	lastHash, err := engine.getLastIncidentHash()
 	if err != nil {
@@ -213,12 +230,6 @@ func NewPolicyEngine(config PolicyConfig, dbPath string, verifier EvidenceVerifi
 		return nil, fmt.Errorf("failed to load last incident hash: %w", err)
 	}
 	engine.lastHash = lastHash
-
-	// Persist initial config if database is empty
-	if err := engine.persistConfig(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to persist initial config: %w", err)
-	}
 
 	return engine, nil
 }
@@ -667,9 +678,13 @@ func (e *PolicyEngine) GetIncidentLog(limit int, incidentType IncidentType) ([]I
 	var incidents []IncidentRecord
 	for rows.Next() {
 		var inc IncidentRecord
-		if err := rows.Scan(&inc.ID, &inc.Type, &inc.Timestamp, &inc.Actor, &inc.Details, &inc.PrevHash, &inc.Hash); err != nil {
+		var timeStr string
+		var detailsStr string
+		if err := rows.Scan(&inc.ID, &inc.Type, &timeStr, &inc.Actor, &detailsStr, &inc.PrevHash, &inc.Hash); err != nil {
 			return nil, err
 		}
+		inc.Timestamp, _ = time.Parse(time.RFC3339Nano, timeStr)
+		inc.Details = json.RawMessage(detailsStr)
 		incidents = append(incidents, inc)
 	}
 	return incidents, rows.Err()
@@ -689,9 +704,13 @@ func (e *PolicyEngine) VerifyAuditChain() error {
 	var prevHash string
 	for rows.Next() {
 		var inc IncidentRecord
-		if err := rows.Scan(&inc.ID, &inc.Type, &inc.Timestamp, &inc.Actor, &inc.Details, &inc.PrevHash, &inc.Hash); err != nil {
+		var timeStr string
+		var detailsStr string
+		if err := rows.Scan(&inc.ID, &inc.Type, &timeStr, &inc.Actor, &detailsStr, &inc.PrevHash, &inc.Hash); err != nil {
 			return err
 		}
+		inc.Timestamp, _ = time.Parse(time.RFC3339Nano, timeStr)
+		inc.Details = json.RawMessage(detailsStr)
 
 		if inc.PrevHash != prevHash {
 			return fmt.Errorf("hash chain broken at incident %s: expected prev_hash %s, got %s", inc.ID, prevHash, inc.PrevHash)
@@ -723,7 +742,7 @@ func (e *PolicyEngine) persistConfig() error {
 
 	_, err = e.db.Exec(
 		`INSERT OR REPLACE INTO policy_config (id, config_json, updated_at, updated_by) VALUES (1, ?, ?, ?)`,
-		string(configJSON), e.config.UpdatedAt.UTC().Format(time.RFC3339), e.config.UpdatedBy,
+		string(configJSON), e.config.UpdatedAt.UTC().Format(time.RFC3339Nano), e.config.UpdatedBy,
 	)
 	return err
 }
@@ -732,7 +751,7 @@ func (e *PolicyEngine) persistConfig() error {
 func (e *PolicyEngine) appendIncident(inc IncidentRecord) error {
 	_, err := e.db.Exec(
 		`INSERT INTO incident_log (id, type, timestamp, actor, details, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		inc.ID, inc.Type, inc.Timestamp.UTC().Format(time.RFC3339), inc.Actor, string(inc.Details), inc.PrevHash, inc.Hash,
+		inc.ID, inc.Type, inc.Timestamp.UTC().Format(time.RFC3339Nano), inc.Actor, string(inc.Details), inc.PrevHash, inc.Hash,
 	)
 	return err
 }
@@ -752,6 +771,9 @@ func (e *PolicyEngine) getLastIncidentHash() (string, error) {
 
 // computeHash computes a deterministic hash of an incident record for chaining.
 func computeHash(inc IncidentRecord) string {
+	// debug
+	// fmt.Printf("DEBUG computeHash: id=%s time=%s details=%s\n", inc.ID, inc.Timestamp.UTC().Format(time.RFC3339Nano), string(inc.Details))
+
 	// Use a simple but deterministic hash for chaining
 	// In production, use a cryptographic hash (SHA-256)
 	data := fmt.Sprintf("%s|%s|%s|%s|%s|%s",

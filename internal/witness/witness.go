@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +31,7 @@ type Witness struct {
 	privateKey ed25519.PrivateKey
 	publicKey  crypto.PublicKey
 	keyHash    crypto.Hash
+	keyId      checkpoint.KeyId
 	url        string
 
 	// Trusted log public keys
@@ -80,6 +80,7 @@ func NewWitness(config *WitnessConfig) (*Witness, error) {
 	}
 
 	keyHash := pub.Hash()
+	keyId := checkpoint.NewWitnessKeyId(config.Name, &pub)
 
 	trustedLogs := config.TrustedLogs
 	if trustedLogs == nil {
@@ -91,6 +92,7 @@ func NewWitness(config *WitnessConfig) (*Witness, error) {
 		privateKey:  priv,
 		publicKey:   pub,
 		keyHash:     keyHash,
+		keyId:       keyId,
 		url:         config.URL,
 		trustedLogs: trustedLogs,
 		store:       config.Store,
@@ -201,7 +203,7 @@ func (w *Witness) handleAddCheckpoint(wr http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse the request according to C2SP tlog-witness protocol
-	cosig, conflictSize, err := w.processCheckpointRequest(body)
+	cosig, conflictSize, err := w.ProcessCheckpointRequest(body)
 	if err != nil {
 		// Check if it's a consistency conflict (409)
 		if conflictSize > 0 {
@@ -219,15 +221,16 @@ func (w *Witness) handleAddCheckpoint(wr http.ResponseWriter, r *http.Request) {
 	wr.Header().Set("Content-Type", "text/plain")
 	wr.WriteHeader(http.StatusOK)
 
-	// Write cosignature in protocol format
-	// Format: cosignature <timestamp> <signature-base64>
-	timestamp := time.Now().Unix()
-	sigB64 := base64.StdEncoding.EncodeToString(cosig.Signature[:])
-	fmt.Fprintf(wr, "cosignature %d %s\n", timestamp, sigB64)
+	csl := checkpoint.CosignatureLine{
+		KeyName:     w.name,
+		KeyId:       w.keyId,
+		Cosignature: cosig.Cosignature,
+	}
+	_ = csl.ToASCII(wr)
 }
 
-// processCheckpointRequest processes a checkpoint request and returns a cosignature or conflict.
-func (w *Witness) processCheckpointRequest(body []byte) (*types.Cosignature, uint64, error) {
+// ProcessCheckpointRequest processes a checkpoint request and returns a cosignature or conflict.
+func (w *Witness) ProcessCheckpointRequest(body []byte) (*types.Cosignature, uint64, error) {
 	// Parse the request format: old-size, consistency proof hashes, empty line, checkpoint
 	lines := strings.Split(string(body), "\n")
 
@@ -262,7 +265,7 @@ func (w *Witness) processCheckpointRequest(body []byte) (*types.Cosignature, uin
 
 	// Parse checkpoint (remaining lines)
 	checkpointText := strings.Join(lines[lineIdx:], "\n")
-	cp, err := parseCheckpointFromText(checkpointText)
+	cp, err := w.parseCheckpointFromText(checkpointText)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to parse checkpoint: %w", err)
 	}
@@ -294,13 +297,16 @@ func (w *Witness) processCheckpointRequest(body []byte) (*types.Cosignature, uin
 		return nil, 0, fmt.Errorf("invalid checkpoint signature: %w", err)
 	}
 
-	// Verify consistency proof if oldSize > 0
-	if oldSize > 0 {
+	// Verify consistency proof if oldSize > 0 and oldSize < cp.TreeHead.Size
+	if oldSize > 0 && oldSize < cp.TreeHead.Size {
 		if err := w.verifyConsistencyProof(logID, oldSize, cp.TreeHead.Size, proofHashes, cp.TreeHead.RootHash); err != nil {
 			// Return 409 Conflict with the old size we have
 			persistedSize, _, _ := w.store.GetWitnessState(w.keyHash, logID)
 			return nil, persistedSize, fmt.Errorf("consistency proof verification failed: %w", err)
 		}
+	} else if oldSize > cp.TreeHead.Size {
+		persistedSize, _, _ := w.store.GetWitnessState(w.keyHash, logID)
+		return nil, persistedSize, errors.New("checkpoint is older than requested old-size")
 	}
 
 	// Get persisted state for this log
@@ -459,31 +465,28 @@ func reconstructRootFromConsistencyProof(oldRoot crypto.Hash, oldSize, newSize u
 
 // createCosignature creates a cosignature for the given checkpoint.
 func (w *Witness) createCosignature(cp *types.Checkpoint) (*types.Cosignature, error) {
-	// Format the checkpoint for signing (RFC 6962 format)
-	// The format is: origin\nsize\nroot-hash-base64\n
-	checkpointText := fmt.Sprintf("%s\n%d\n%s\n",
-		cp.Origin,
-		cp.TreeHead.Size,
-		base64.StdEncoding.EncodeToString(cp.TreeHead.RootHash[:]))
+	var cPriv crypto.PrivateKey
+	copy(cPriv[:], w.privateKey)
+	signer := crypto.NewEd25519Signer(&cPriv)
+	timestamp := uint64(time.Now().Unix())
 
-	// Sign the checkpoint text
-	signature := ed25519.Sign(w.privateKey, []byte(checkpointText))
-
-	var sig crypto.Signature
-	copy(sig[:], signature)
-
-	cosig := &types.Cosignature{
-		Cosignature: checkpoint.CosignatureLine{
-			KeyHash:   w.keyHash,
-			Timestamp: uint64(time.Now().Unix()),
-			Signature: sig,
-		},
-		WitnessID: w.keyHash,
-		Verified:  false,
-		VerifiedAt: time.Time{},
+	cosig, err := cp.Checkpoint.Cosign(signer, timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to cosign checkpoint: %w", err)
 	}
 
-	return cosig, nil
+	return &types.Cosignature{
+		CosignatureLine: &checkpoint.CosignatureLine{
+			KeyName:     w.name,
+			KeyId:       w.keyId,
+			Cosignature: cosig,
+		},
+		WitnessID:  w.keyHash,
+		Verified:   true,
+		VerifiedAt: time.Now(),
+		TreeSize:   cp.TreeHead.Size,
+		RootHash:   cp.TreeHead.RootHash,
+	}, nil
 }
 
 // persistCheckpointAndCosignature persists the checkpoint and cosignature.
@@ -509,14 +512,32 @@ func (w *Witness) persistCheckpointAndCosignature(cp *types.Checkpoint, cosig *t
 }
 
 // parseCheckpointFromText parses a checkpoint from its text representation.
-func parseCheckpointFromText(text string) (*types.Checkpoint, error) {
+func (w *Witness) parseCheckpointFromText(text string) (*types.Checkpoint, error) {
 	cp := &checkpoint.Checkpoint{}
 	if err := cp.FromASCII(strings.NewReader(text)); err != nil {
 		return nil, err
 	}
 
-	// LogID is the hash of the log's public key (from the signed tree head)
-	logID := cp.SignedTreeHead.PublicKey.Hash()
+	// Find the log public key from trusted logs by matching KeyId
+	var logPubKey crypto.PublicKey
+	var logID crypto.Hash
+	for h, log := range w.trustedLogs {
+		keyId := checkpoint.NewLogKeyId(log.Origin, &log.PublicKey)
+		if keyId == cp.KeyId {
+			logPubKey = log.PublicKey
+			logID = h
+			break
+		}
+	}
+
+	if logPubKey == (crypto.PublicKey{}) {
+		// Fallback: use the first trusted log (should not happen in normal operation)
+		for h, log := range w.trustedLogs {
+			logPubKey = log.PublicKey
+			logID = h
+			break
+		}
+	}
 
 	return &types.Checkpoint{
 		Checkpoint: cp,

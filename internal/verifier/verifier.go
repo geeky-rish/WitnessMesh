@@ -4,20 +4,15 @@ package verifier
 
 import (
 	"bytes"
-	"crypto/ed25519"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"strings"
+	"os"
 
 	"sigsum.org/sigsum-go/pkg/checkpoint"
 	"sigsum.org/sigsum-go/pkg/crypto"
 	"sigsum.org/sigsum-go/pkg/merkle"
-	sigsumtypes "sigsum.org/sigsum-go/pkg/types"
 
 	"witnessmesh/internal/evidence"
 	"witnessmesh/internal/types"
@@ -28,7 +23,7 @@ import (
 // Valid=false means malformed, forged, inconsistent, or insufficient evidence.
 type VerificationResult struct {
 	Valid       bool
-	Case        evidence.EvidenceCase
+	Case        types.EvidenceCase
 	Description string
 	Errors      []string
 }
@@ -71,7 +66,7 @@ func (v *Verifier) AddTrustedWitnessKey(pubKey *crypto.PublicKey) {
 // VerifyFile reads an evidence bundle from a file and verifies it.
 // Supports both JSON and deterministic binary (hex-encoded) formats.
 func (v *Verifier) VerifyFile(filename string) (*VerificationResult, error) {
-	data, err := io.ReadAll(strings.NewReader(filename))
+	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -84,22 +79,22 @@ func (v *Verifier) VerifyBytes(data []byte) (*VerificationResult, error) {
 	// Try JSON first
 	var eb evidence.EvidenceBundle
 	if err := json.Unmarshal(data, &eb); err == nil {
-		return v.VerifyBundle(&eb)
+		return v.VerifyBundle(&eb), nil
 	}
 
 	// Try hex-encoded deterministic binary
 	decoded, err := hex.DecodeString(string(data))
 	if err == nil {
-		eb, err := evidence.DeserializeDeterministic(decoded)
+		ebPtr, err := evidence.DeserializeDeterministic(decoded)
 		if err == nil {
-			return v.VerifyBundle(eb)
+			return v.VerifyBundle(ebPtr), nil
 		}
 	}
 
 	// Try raw deterministic binary
-	eb, err = evidence.DeserializeDeterministic(data)
+	ebPtr, err := evidence.DeserializeDeterministic(data)
 	if err == nil {
-		return v.VerifyBundle(eb)
+		return v.VerifyBundle(ebPtr), nil
 	}
 
 	return &VerificationResult{
@@ -163,15 +158,15 @@ func (v *Verifier) VerifyBundle(eb *evidence.EvidenceBundle) *VerificationResult
 
 	// 4. Case-specific verification
 	switch eb.Case {
-	case evidence.EvidenceCaseSameSizeFork:
+	case types.EvidenceCaseSameSizeFork:
 		result.Description = "Same-size fork: two checkpoints with same log ID and size, different roots"
 		v.verifySameSizeFork(eb, result)
 
-	case evidence.EvidenceCaseDifferentSizeFork:
+	case types.EvidenceCaseDifferentSizeFork:
 		result.Description = "Different-size fork: two checkpoints at different sizes with consistency proof"
 		v.verifyDifferentSizeFork(eb, result)
 
-	case evidence.EvidenceCaseWitnessEquivocation:
+	case types.EvidenceCaseWitnessEquivocation:
 		result.Description = "Witness equivocation: single witness signing conflicting checkpoints"
 		v.verifyWitnessEquivocation(eb, result)
 
@@ -314,22 +309,23 @@ func (v *Verifier) verifyConsistencyProof(proof *evidence.ConsistencyProof, tree
 	}
 
 	// Compute old root from leaves
-	computedOldRoot := merkle.ComputeRootHash(treeData.Leaves)
+	computedOldRoot := computeRootHash(treeData.Leaves)
 	if computedOldRoot != cpOld.Checkpoint.SignedTreeHead.RootHash {
 		return fmt.Errorf("computed old root %x does not match checkpoint root %x",
 			computedOldRoot[:4], cpOld.Checkpoint.SignedTreeHead.RootHash[:4])
 	}
 
-	// Verify consistency proof: compute new root from old leaves + proof hashes
-	computedNewRoot := merkle.VerifyConsistencyProof(
-		treeData.Leaves,
-		proof.Hashes,
+	// Verify consistency proof using sigsum-go merkle.VerifyConsistency
+	// This verifies that the new root can be computed from the old root and proof hashes
+	err := merkle.VerifyConsistency(
 		proof.OldSize,
 		proof.NewSize,
+		&cpOld.Checkpoint.SignedTreeHead.RootHash,
+		&cpNew.Checkpoint.SignedTreeHead.RootHash,
+		proof.Hashes,
 	)
-	if computedNewRoot != cpNew.Checkpoint.SignedTreeHead.RootHash {
-		return fmt.Errorf("consistency proof yields root %x, expected %x",
-			computedNewRoot[:4], cpNew.Checkpoint.SignedTreeHead.RootHash[:4])
+	if err != nil {
+		return fmt.Errorf("consistency proof verification failed: %w", err)
 	}
 
 	return nil
@@ -373,8 +369,8 @@ func (v *Verifier) verifyWitnessEquivocation(eb *evidence.EvidenceBundle, result
 		// Find matching checkpoint
 		var matchedCP *types.Checkpoint
 		for _, cp := range eb.Checkpoints {
-			if cp.Checkpoint.SignedTreeHead.Size == cosig.Cosignature.TreeSize &&
-				cp.Checkpoint.SignedTreeHead.RootHash == cosig.Cosignature.RootHash {
+			if cp.Checkpoint.SignedTreeHead.Size == cosig.TreeSize &&
+				cp.Checkpoint.SignedTreeHead.RootHash == cosig.RootHash {
 				matchedCP = cp
 				break
 			}
@@ -442,22 +438,42 @@ func VerifyMerkleConsistencyProof(
 		return fmt.Errorf("leaf count (%d) != old size (%d)", len(leaves), oldSize)
 	}
 
-	computedOldRoot := merkle.ComputeRootHash(leaves)
+	computedOldRoot := computeRootHash(leaves)
 	if computedOldRoot != expectedOldRoot {
 		return fmt.Errorf("computed old root %x != expected %x", computedOldRoot[:4], expectedOldRoot[:4])
 	}
 
-	computedNewRoot := merkle.VerifyConsistencyProof(leaves, proofHashes, oldSize, newSize)
-	if computedNewRoot != expectedNewRoot {
-		return fmt.Errorf("consistency proof yields %x != expected %x", computedNewRoot[:4], expectedNewRoot[:4])
+	err := merkle.VerifyConsistency(
+		oldSize,
+		newSize,
+		&expectedOldRoot,
+		&expectedNewRoot,
+		proofHashes,
+	)
+	if err != nil {
+		return fmt.Errorf("consistency proof verification failed: %w", err)
 	}
 
 	return nil
 }
 
+// computeRootHash computes the Merkle root hash from leaf hashes per RFC 6962.
+// This is a helper function since sigsum-go merkle package doesn't expose ComputeRootHash directly.
+func computeRootHash(leaves []crypto.Hash) crypto.Hash {
+	tree := merkle.NewTree()
+	for _, l := range leaves {
+		h := l
+		tree.AddLeafHash(&h)
+	}
+	return tree.GetRootHash()
+}
+
 // VerifyMerkleInclusionProof verifies a single inclusion proof.
-func VerifyMerkleInclusionProof(leafIndex, treeSize uint64, proofHashes []crypto.Hash, rootHash crypto.Hash) bool {
-	return merkle.VerifyInclusionProof(leafIndex, proofHashes, treeSize, rootHash)
+func VerifyMerkleInclusionProof(leaf *crypto.Hash, leafIndex, treeSize uint64, proofHashes []crypto.Hash, rootHash crypto.Hash) bool {
+	if leaf == nil {
+		return false
+	}
+	return merkle.VerifyInclusion(leaf, leafIndex, treeSize, &rootHash, proofHashes) == nil
 }
 
 // ParseCheckpointFromASCII parses a checkpoint from ASCII format.
@@ -466,9 +482,11 @@ func ParseCheckpointFromASCII(data []byte) (*types.Checkpoint, error) {
 	if err := cp.FromASCII(bytes.NewReader(data)); err != nil {
 		return nil, err
 	}
+	var logID crypto.Hash
+	copy(logID[:4], cp.KeyId[:])
 	return &types.Checkpoint{
 		Checkpoint: cp,
-		LogID:      cp.KeyId.Hash(), // This is an approximation - actual LogID needs the public key
+		LogID:      logID,
 	}, nil
 }
 

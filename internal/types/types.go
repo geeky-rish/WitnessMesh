@@ -2,6 +2,7 @@
 package types
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 type LogIdentity struct {
 	PublicKey crypto.PublicKey
 	Origin    string // The checkpoint origin string
+	KeyHash   crypto.Hash
 }
 
 // WitnessIdentity represents a witness's identity
@@ -41,6 +43,10 @@ type Cosignature struct {
 	WitnessID crypto.Hash
 	Verified  bool
 	VerifiedAt time.Time
+	// TreeSize and RootHash store the checkpoint TreeHead that this cosignature was created for.
+	// These are not part of the sigsum-go Cosignature but are needed for evidence matching.
+	TreeSize  uint64
+	RootHash  crypto.Hash
 }
 
 // CosignedCheckpoint represents a checkpoint with witness cosignatures
@@ -53,15 +59,15 @@ type CosignedCheckpoint struct {
 
 // EvidenceBundle represents a cryptographic evidence bundle
 type EvidenceBundle struct {
-	Version        int
-	LogIdentity    LogIdentity
-	Case           EvidenceCase
-	Checkpoints    []*Checkpoint
-	Cosignatures   []Cosignature
-	ConsistencyProof *ConsistencyProof
-	DetectionTime  time.Time
-	DetectorID     string
-	Metadata       map[string]string
+	Version          int               `json:"format_version"`
+	LogIdentity      LogIdentity       `json:"log_identity"`
+	Case             EvidenceCase      `json:"case"`
+	Checkpoints      []*Checkpoint     `json:"checkpoints"`
+	Cosignatures     []Cosignature     `json:"cosignatures,omitempty"`
+	ConsistencyProof *ConsistencyProof `json:"consistency_proof,omitempty"`
+	DetectionTime    time.Time         `json:"detection_time"`
+	DetectorID       string            `json:"detector_id"`
+	Metadata         map[string]string `json:"metadata,omitempty"`
 }
 
 // EvidenceCase represents the type of evidence
@@ -186,6 +192,7 @@ func NewLogIdentity(pubKey *crypto.PublicKey) *LogIdentity {
 	return &LogIdentity{
 		PublicKey: *pubKey,
 		Origin:    origin,
+		KeyHash:   keyHash,
 	}
 }
 
@@ -212,7 +219,16 @@ func HashToBase64(h crypto.Hash) string {
 
 // SignatureFromBase64 decodes a base64 signature
 func SignatureFromBase64(s string) (crypto.Signature, error) {
-	return crypto.SignatureFromBase64(s)
+	data, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return crypto.Signature{}, err
+	}
+	if len(data) != ed25519.SignatureSize {
+		return crypto.Signature{}, fmt.Errorf("invalid signature length: %d", len(data))
+	}
+	var sig crypto.Signature
+	copy(sig[:], data)
+	return sig, nil
 }
 
 // SignatureToBase64 encodes a signature to base64

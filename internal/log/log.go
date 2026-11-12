@@ -6,21 +6,17 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"sync"
 	"time"
 
-	"sigsum.org/sigsum-go/pkg/api"
 	"sigsum.org/sigsum-go/pkg/checkpoint"
 	"sigsum.org/sigsum-go/pkg/crypto"
 	"sigsum.org/sigsum-go/pkg/merkle"
 	"sigsum.org/sigsum-go/pkg/requests"
-	"sigsum.org/sigsum-go/pkg/server"
-	"sigsum.org/sigsum-go/pkg/types"
+	sigsumtypes "sigsum.org/sigsum-go/pkg/types"
 
 	"witnessmesh/internal/storage"
 	"witnessmesh/internal/types"
@@ -48,13 +44,13 @@ type TransparencyLog struct {
 	publicKey    crypto.PublicKey
 	origin       string
 	leaves       []Leaf
-	treeHeads    []types.TreeHead
+	treeHeads    []sigsumtypes.TreeHead
 	checkpoints  []*types.Checkpoint
 	store        *storage.SQLiteStore
 	malicious    bool
 	maliciousMu  sync.Mutex
 	altLeaves    []Leaf // Alternative history for split-view attack
-	altTreeHeads []types.TreeHead
+	altTreeHeads []sigsumtypes.TreeHead
 }
 
 // NewTransparencyLog creates a new transparency log
@@ -66,24 +62,24 @@ func NewTransparencyLog(store *storage.SQLiteStore, malicious bool) (*Transparen
 	}
 
 	publicKey := crypto.PublicKey(pub)
-	origin := types.SigsumCheckpointOrigin(&publicKey)
+	origin := sigsumtypes.SigsumCheckpointOrigin(&publicKey)
 
 	log := &TransparencyLog{
 		privateKey:   priv,
 		publicKey:    publicKey,
 		origin:       origin,
 		leaves:       make([]Leaf, 0),
-		treeHeads:    make([]types.TreeHead, 1), // Index 0 is empty tree
+		treeHeads:    make([]sigsumtypes.TreeHead, 1), // Index 0 is empty tree
 		checkpoints:  make([]*types.Checkpoint, 0),
 		store:        store,
 		malicious:    malicious,
 		altLeaves:    make([]Leaf, 0),
-		altTreeHeads: make([]types.TreeHead, 1),
+		altTreeHeads: make([]sigsumtypes.TreeHead, 1),
 	}
 
 	// Initialize empty tree head
-	log.treeHeads[0] = types.NewEmptyTreeHead()
-	log.altTreeHeads[0] = types.NewEmptyTreeHead()
+	log.treeHeads[0] = sigsumtypes.NewEmptyTreeHead()
+	log.altTreeHeads[0] = sigsumtypes.NewEmptyTreeHead()
 
 	return log, nil
 }
@@ -91,23 +87,23 @@ func NewTransparencyLog(store *storage.SQLiteStore, malicious bool) (*Transparen
 // NewTransparencyLogFromKey creates a log from an existing private key
 func NewTransparencyLogFromKey(priv ed25519.PrivateKey, store *storage.SQLiteStore, malicious bool) (*TransparencyLog, error) {
 	publicKey := crypto.PublicKey(priv.Public().(ed25519.PublicKey))
-	origin := types.SigsumCheckpointOrigin(&publicKey)
+	origin := sigsumtypes.SigsumCheckpointOrigin(&publicKey)
 
 	log := &TransparencyLog{
 		privateKey:   priv,
 		publicKey:    publicKey,
 		origin:       origin,
 		leaves:       make([]Leaf, 0),
-		treeHeads:    make([]types.TreeHead, 1),
+		treeHeads:    make([]sigsumtypes.TreeHead, 1),
 		checkpoints:  make([]*types.Checkpoint, 0),
 		store:        store,
 		malicious:    malicious,
 		altLeaves:    make([]Leaf, 0),
-		altTreeHeads: make([]types.TreeHead, 1),
+		altTreeHeads: make([]sigsumtypes.TreeHead, 1),
 	}
 
-	log.treeHeads[0] = types.NewEmptyTreeHead()
-	log.altTreeHeads[0] = types.NewEmptyTreeHead()
+	log.treeHeads[0] = sigsumtypes.NewEmptyTreeHead()
+	log.altTreeHeads[0] = sigsumtypes.NewEmptyTreeHead()
 
 	return log, nil
 }
@@ -140,24 +136,19 @@ func (l *TransparencyLog) RootHash() crypto.Hash {
 }
 
 // AddLeaf adds a new leaf to the log
-func (l *TransparencyLog) AddLeaf(ctx context.Context, req requests.Leaf, submitHeader *requests.SubmitHeader) (bool, error) {
+func (l *TransparencyLog) AddLeaf(ctx context.Context, req requests.Leaf) (bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// Verify the leaf signature
-	submitterPubKey, err := crypto.PublicKeyFromBytes(req.KeyHash[:])
-	if err != nil {
-		return false, fmt.Errorf("invalid submitter key: %w", err)
+	// Verify the leaf signature using the public key from the request
+	if !req.PublicKey.Verify(req.Message[:], &req.Signature) {
+		return false, errors.New("invalid leaf signature")
 	}
 
 	leaf := Leaf{
-		Checksum:  req.Checksum,
+		Checksum:  req.Message,
 		Signature: req.Signature,
-		KeyHash:   req.KeyHash,
-	}
-
-	if !submitterPubKey.Verify(leaf.Checksum[:], &leaf.Signature) {
-		return false, errors.New("invalid leaf signature")
+		KeyHash:   req.PublicKey.Hash(),
 	}
 
 	l.leaves = append(l.leaves, leaf)
@@ -167,7 +158,7 @@ func (l *TransparencyLog) AddLeaf(ctx context.Context, req requests.Leaf, submit
 }
 
 // GetLeaves returns a range of leaves
-func (l *TransparencyLog) GetLeaves(ctx context.Context, req requests.Leaves) ([]types.Leaf, error) {
+func (l *TransparencyLog) GetLeaves(ctx context.Context, req requests.Leaves) ([]sigsumtypes.Leaf, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
@@ -180,10 +171,10 @@ func (l *TransparencyLog) GetLeaves(ctx context.Context, req requests.Leaves) ([
 		end = uint64(len(l.leaves))
 	}
 
-	result := make([]types.Leaf, end-req.StartIndex)
+	result := make([]sigsumtypes.Leaf, end-req.StartIndex)
 	for i := req.StartIndex; i < end; i++ {
 		leaf := l.leaves[i]
-		result[i-req.StartIndex] = types.Leaf{
+		result[i-req.StartIndex] = sigsumtypes.Leaf{
 			Checksum:  leaf.Checksum,
 			Signature: leaf.Signature,
 			KeyHash:   leaf.KeyHash,
@@ -194,44 +185,47 @@ func (l *TransparencyLog) GetLeaves(ctx context.Context, req requests.Leaves) ([
 }
 
 // GetTreeHead returns the current cosigned tree head
-func (l *TransparencyLog) GetTreeHead(ctx context.Context) (types.CosignedTreeHead, error) {
+func (l *TransparencyLog) GetTreeHead(ctx context.Context) (sigsumtypes.CosignedTreeHead, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
 	latestTreeHead := l.treeHeads[len(l.treeHeads)-1]
 
-	// Sign the checkpoint
-	signedTreeHead, err := latestTreeHead.Sign(l.privateKey)
-	if err != nil {
-		return types.CosignedTreeHead{}, fmt.Errorf("failed to sign tree head: %w", err)
+	// Sign the checkpoint manually (ed25519.PrivateKey doesn't implement crypto.Signer)
+	checkpointText := fmt.Sprintf("%s\n%d\n%s\n",
+		l.origin,
+		latestTreeHead.Size,
+		base64.StdEncoding.EncodeToString(latestTreeHead.RootHash[:]))
+
+	signature := ed25519.Sign(l.privateKey, []byte(checkpointText))
+
+	var sig crypto.Signature
+	copy(sig[:], signature)
+
+	signedTreeHead := sigsumtypes.SignedTreeHead{
+		TreeHead:  latestTreeHead,
+		Signature: sig,
 	}
 
-	// Create checkpoint
-	cp := &checkpoint.Checkpoint{
+	cth := sigsumtypes.CosignedTreeHead{
 		SignedTreeHead: signedTreeHead,
-		Origin:         l.origin,
-		KeyId:          checkpoint.NewLogKeyId(l.origin, &l.publicKey),
-	}
-
-	cth := types.CosignedTreeHead{
-		SignedTreeHead: signedTreeHead,
-		Cosignatures:   make(map[crypto.Hash]types.Cosignature),
+		Cosignatures:   make(map[crypto.Hash]sigsumtypes.Cosignature),
 	}
 
 	return cth, nil
 }
 
 // GetInclusionProof returns an inclusion proof for a leaf
-func (l *TransparencyLog) GetInclusionProof(ctx context.Context, req requests.InclusionProof) (types.InclusionProof, error) {
+func (l *TransparencyLog) GetInclusionProof(ctx context.Context, req requests.InclusionProof) (sigsumtypes.InclusionProof, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
 	if req.Size > uint64(len(l.leaves)) {
-		return types.InclusionProof{}, errors.New("tree size exceeds current size")
+		return sigsumtypes.InclusionProof{}, errors.New("tree size exceeds current size")
 	}
 
 	if req.Size < 2 {
-		return types.InclusionProof{}, nil
+		return sigsumtypes.InclusionProof{}, nil
 	}
 
 	// Find the leaf index
@@ -244,7 +238,7 @@ func (l *TransparencyLog) GetInclusionProof(ctx context.Context, req requests.In
 	}
 
 	if leafIndex == -1 {
-		return types.InclusionProof{}, errors.New("leaf not found")
+		return sigsumtypes.InclusionProof{}, errors.New("leaf not found")
 	}
 
 	// Generate inclusion proof using RFC 6962 algorithm
@@ -253,16 +247,16 @@ func (l *TransparencyLog) GetInclusionProof(ctx context.Context, req requests.In
 }
 
 // GetConsistencyProof returns a consistency proof between two tree sizes
-func (l *TransparencyLog) GetConsistencyProof(ctx context.Context, req requests.ConsistencyProof) (types.ConsistencyProof, error) {
+func (l *TransparencyLog) GetConsistencyProof(ctx context.Context, req requests.ConsistencyProof) (sigsumtypes.ConsistencyProof, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
 	if req.OldSize > req.NewSize {
-		return types.ConsistencyProof{}, errors.New("old size cannot exceed new size")
+		return sigsumtypes.ConsistencyProof{}, errors.New("old size cannot exceed new size")
 	}
 
 	if req.NewSize > uint64(len(l.leaves)) {
-		return types.ConsistencyProof{}, errors.New("new size exceeds current size")
+		return sigsumtypes.ConsistencyProof{}, errors.New("new size exceeds current size")
 	}
 
 	proof := l.generateConsistencyProof(req.OldSize, req.NewSize)
@@ -270,44 +264,41 @@ func (l *TransparencyLog) GetConsistencyProof(ctx context.Context, req requests.
 }
 
 // generateInclusionProof generates an RFC 6962 inclusion proof
-func (l *TransparencyLog) generateInclusionProof(leafIndex, treeSize uint64) types.InclusionProof {
+func (l *TransparencyLog) generateInclusionProof(leafIndex, treeSize uint64) sigsumtypes.InclusionProof {
 	// Simplified inclusion proof generation
 	// In a real implementation, this would compute the Merkle audit path
 	var hashes []crypto.Hash
 
 	// This is a placeholder - real implementation would compute the actual proof
 	// using the Merkle tree structure
-	return types.InclusionProof{
+	return sigsumtypes.InclusionProof{
 		LeafIndex: leafIndex,
-		TreeSize:  treeSize,
-		Hashes:    hashes,
+		Path:      hashes,
 	}
 }
 
 // generateConsistencyProof generates an RFC 6962 consistency proof
-func (l *TransparencyLog) generateConsistencyProof(oldSize, newSize uint64) types.ConsistencyProof {
+func (l *TransparencyLog) generateConsistencyProof(oldSize, newSize uint64) sigsumtypes.ConsistencyProof {
 	// Simplified consistency proof generation
 	// Real implementation would compute the actual proof
 	var hashes []crypto.Hash
 
-	return types.ConsistencyProof{
-		OldSize: oldSize,
-		NewSize: newSize,
-		Hashes:  hashes,
+	return sigsumtypes.ConsistencyProof{
+		Path: hashes,
 	}
 }
 
 // updateTreeHeads recomputes the Merkle tree heads
 func (l *TransparencyLog) updateTreeHeads() {
 	// Recompute tree heads for all sizes
-	l.treeHeads = make([]types.TreeHead, len(l.leaves)+1)
-	l.treeHeads[0] = types.NewEmptyTreeHead()
+	l.treeHeads = make([]sigsumtypes.TreeHead, len(l.leaves)+1)
+	l.treeHeads[0] = sigsumtypes.NewEmptyTreeHead()
 
 	for i := 1; i <= len(l.leaves); i++ {
 		// Compute root hash for tree of size i
 		// This is a simplified implementation
 		rootHash := l.computeRootHash(i)
-		l.treeHeads[i] = types.TreeHead{
+		l.treeHeads[i] = sigsumtypes.TreeHead{
 			Size:     uint64(i),
 			RootHash: rootHash,
 		}
@@ -350,9 +341,21 @@ func (l *TransparencyLog) CreateCheckpoint() (*types.Checkpoint, error) {
 	defer l.mu.Unlock()
 
 	latestTreeHead := l.treeHeads[len(l.treeHeads)-1]
-	signedTreeHead, err := latestTreeHead.Sign(l.privateKey)
-	if err != nil {
-		return nil, err
+
+	// Sign manually
+	checkpointText := fmt.Sprintf("%s\n%d\n%s\n",
+		l.origin,
+		latestTreeHead.Size,
+		base64.StdEncoding.EncodeToString(latestTreeHead.RootHash[:]))
+
+	signature := ed25519.Sign(l.privateKey, []byte(checkpointText))
+
+	var sig crypto.Signature
+	copy(sig[:], signature)
+
+	signedTreeHead := sigsumtypes.SignedTreeHead{
+		TreeHead:  latestTreeHead,
+		Signature: sig,
 	}
 
 	cp := &checkpoint.Checkpoint{
@@ -412,12 +415,12 @@ func (l *TransparencyLog) CreateAlternativeHistory(leaves []Leaf) {
 	copy(l.altLeaves, leaves)
 
 	// Recompute alt tree heads
-	l.altTreeHeads = make([]types.TreeHead, len(leaves)+1)
-	l.altTreeHeads[0] = types.NewEmptyTreeHead()
+	l.altTreeHeads = make([]sigsumtypes.TreeHead, len(leaves)+1)
+	l.altTreeHeads[0] = sigsumtypes.NewEmptyTreeHead()
 
 	for i := 1; i <= len(leaves); i++ {
 		rootHash := l.computeAltRootHash(i)
-		l.altTreeHeads[i] = types.TreeHead{
+		l.altTreeHeads[i] = sigsumtypes.TreeHead{
 			Size:     uint64(i),
 			RootHash: rootHash,
 		}
@@ -465,9 +468,21 @@ func (l *TransparencyLog) GetMaliciousCheckpoint(size uint64) (*types.Checkpoint
 	}
 
 	treeHead := l.altTreeHeads[size]
-	signedTreeHead, err := treeHead.Sign(l.privateKey)
-	if err != nil {
-		return nil, err
+
+	// Sign manually
+	checkpointText := fmt.Sprintf("%s\n%d\n%s\n",
+		l.origin,
+		treeHead.Size,
+		base64.StdEncoding.EncodeToString(treeHead.RootHash[:]))
+
+	signature := ed25519.Sign(l.privateKey, []byte(checkpointText))
+
+	var sig crypto.Signature
+	copy(sig[:], signature)
+
+	signedTreeHead := sigsumtypes.SignedTreeHead{
+		TreeHead:  treeHead,
+		Signature: sig,
 	}
 
 	cp := &checkpoint.Checkpoint{
@@ -484,24 +499,13 @@ func (l *TransparencyLog) GetMaliciousCheckpoint(size uint64) (*types.Checkpoint
 	}, nil
 }
 
-// HTTPHandler returns an HTTP handler for the log
-func (l *TransparencyLog) HTTPHandler() http.Handler {
-	// Create a custom config
-	config := &server.Config{
-		UserAgent: "WitnessMesh-Log",
-	}
-
-	return server.NewLog(config, l)
-}
-
-// Implement api.Log interface
-var _ api.Log = (*TransparencyLog)(nil)
+// Custom log implementation for WitnessMesh (does not implement full sigsum-go api.Log)
 
 // Helper functions for converting between types
-func convertLeaves(leaves []Leaf) []types.Leaf {
-	result := make([]types.Leaf, len(leaves))
+func convertLeaves(leaves []Leaf) []sigsumtypes.Leaf {
+	result := make([]sigsumtypes.Leaf, len(leaves))
 	for i, leaf := range leaves {
-		result[i] = types.Leaf{
+		result[i] = sigsumtypes.Leaf{
 			Checksum:  leaf.Checksum,
 			Signature: leaf.Signature,
 			KeyHash:   leaf.KeyHash,

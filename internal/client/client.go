@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -10,13 +11,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"sigsum.org/sigsum-go/pkg/ascii"
 	"sigsum.org/sigsum-go/pkg/checkpoint"
 	"sigsum.org/sigsum-go/pkg/crypto"
-	"sigsum.org/sigsum-go/pkg/types"
 
 	"witnessmesh/internal/storage"
 	"witnessmesh/internal/types"
@@ -286,7 +287,7 @@ func (c *Client) fetchCheckpoint(ctx context.Context) (*types.Checkpoint, error)
 // parseCheckpoint parses a checkpoint from ASCII format
 func (c *Client) parseCheckpoint(data []byte) (*types.Checkpoint, error) {
 	cp := &checkpoint.Checkpoint{}
-	p := ascii.NewLineReader(data)
+	p := ascii.NewLineReader(bytes.NewReader(data))
 	if err := cp.Parse(&p); err != nil {
 		return nil, err
 	}
@@ -434,16 +435,22 @@ func (c *Client) collectCosignatures(ctx context.Context, cp *types.Checkpoint) 
 
 // requestCosignature requests a cosignature from a single witness
 func (c *Client) requestCosignature(ctx context.Context, witness WitnessConfig, cp *types.Checkpoint) (types.Cosignature, error) {
-	// Prepare the checkpoint for the witness
-	// The witness expects the checkpoint in ASCII format
-	var buf []byte
-	w := &bytesBuffer{data: buf}
-	if err := cp.Checkpoint.ToASCII(w); err != nil {
+	// Prepare the checkpoint for the witness in C2SP tlog-witness protocol format
+	var buf bytes.Buffer
+	if err := cp.Checkpoint.ToASCII(&buf); err != nil {
 		return types.Cosignature{}, fmt.Errorf("failed to encode checkpoint: %w", err)
 	}
 
+	var oldSize uint64
+	c.mu.RLock()
+	if c.lastCheckpoint != nil {
+		oldSize = c.lastCheckpoint.Checkpoint.SignedTreeHead.Size
+	}
+	c.mu.RUnlock()
+
+	reqBody := fmt.Sprintf("%d\n\n%s", oldSize, buf.String())
 	url := witness.URL + "/add-checkpoint"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, w.reader())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(reqBody))
 	if err != nil {
 		return types.Cosignature{}, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -480,37 +487,32 @@ func (c *Client) requestCosignature(ctx context.Context, witness WitnessConfig, 
 func (c *Client) parseCosignature(data []byte, witness WitnessConfig) (types.Cosignature, error) {
 	// The witness returns a cosignature in ASCII format
 	// Format: cosignature <keyid> <timestamp> <signature>
-	// Or it might return a full checkpoint with cosignature
 
-	p := ascii.NewLineReader(data)
-
-	// Try to parse as a cosignature line
-	var cosigLine checkpoint.CosignatureLine
-	if err := cosigLine.Parse(&p); err != nil {
-		// Try parsing as a full checkpoint with cosignature
-		cp := &checkpoint.Checkpoint{}
-		p2 := ascii.NewLineReader(data)
-		if err2 := cp.Parse(&p2); err2 != nil {
-			return types.Cosignature{}, fmt.Errorf("failed to parse as cosignature or checkpoint: %v, %v", err, err2)
-		}
-		// Extract cosignature from checkpoint
-		if len(cp.Cosignatures) == 0 {
-			return types.Cosignature{}, errors.New("no cosignature in checkpoint")
-		}
-		cosigLine = cp.Cosignatures[0]
+	// Parse cosignature lines from the response
+	cosigLines, err := checkpoint.CosignatureLinesFromASCII(bytes.NewReader(data))
+	if err != nil {
+		return types.Cosignature{}, fmt.Errorf("failed to parse cosignature lines: %w", err)
 	}
 
+	if len(cosigLines) == 0 {
+		return types.Cosignature{}, errors.New("no cosignature in response")
+	}
+
+	cosigLine := cosigLines[0]
+
 	// Verify the key ID matches the witness
-	expectedKeyID := checkpoint.NewWitnessKeyId(witness.KeyHash)
+	expectedKeyID := checkpoint.NewWitnessKeyId(witness.Name, &witness.PublicKey)
 	if cosigLine.KeyId != expectedKeyID {
 		return types.Cosignature{}, fmt.Errorf("key ID mismatch: expected %x, got %x", expectedKeyID, cosigLine.KeyId)
 	}
 
 	return types.Cosignature{
-		Cosignature: cosigLine,
+		CosignatureLine: &cosigLine,
 		WitnessID:   witness.KeyHash,
 		Verified:    false, // Will be verified in verifyCosignatures
 		VerifiedAt:  time.Time{},
+		TreeSize:    0,     // Will be set during verification
+		RootHash:    crypto.Hash{},
 	}, nil
 }
 
@@ -586,7 +588,7 @@ func (c *Client) updateWitnessStates(cp *types.Checkpoint, cosignatures []types.
 			LogOrigin:      cp.Origin,
 			TreeSize:       cp.TreeHead.Size,
 			RootHash:       cp.TreeHead.RootHash,
-			Timestamp:      cs.Timestamp,
+			Timestamp:      time.Unix(int64(cs.Timestamp), 0),
 		}
 
 		c.witnessStates[cs.WitnessID] = state
@@ -698,10 +700,11 @@ func (c *Client) LoadState(ctx context.Context) error {
 			continue // Not an error if state doesn't exist
 		}
 		if treeSize > 0 {
+			logKeyHash := c.config.LogPublicKey.Hash()
 			state := WitnessState{
 				WitnessKeyHash: witness.KeyHash,
 				LogID:          logID,
-				LogOrigin:      c.config.LogPublicKey.Hash().String(), // placeholder
+				LogOrigin:      hex.EncodeToString(logKeyHash[:]),
 				TreeSize:       treeSize,
 				RootHash:       rootHash,
 				Timestamp:      time.Now(),

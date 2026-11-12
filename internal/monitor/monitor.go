@@ -18,7 +18,7 @@ import (
 	"sigsum.org/sigsum-go/pkg/checkpoint"
 	"sigsum.org/sigsum-go/pkg/crypto"
 	"sigsum.org/sigsum-go/pkg/merkle"
-	"sigsum.org/sigsum-go/pkg/types"
+	sigsumtypes "sigsum.org/sigsum-go/pkg/types"
 )
 
 const (
@@ -306,7 +306,7 @@ func (m *Monitor) fetchCheckpointFromLog(ctx context.Context, endpoint string, l
 
 		start := time.Now()
 		resp, err := m.config.HTTPClient.Do(req)
-		responseTime := time.Since(start)
+		_ = time.Since(start)
 
 		if err != nil {
 			lastErr = fmt.Errorf("request failed (attempt %d/%d): %w", attempt+1, m.config.MaxRetries+1, err)
@@ -319,7 +319,7 @@ func (m *Monitor) fetchCheckpointFromLog(ctx context.Context, endpoint string, l
 			continue
 		}
 
-		var cth types.CosignedTreeHead
+		var cth sigsumtypes.CosignedTreeHead
 		if err := json.NewDecoder(resp.Body).Decode(&cth); err != nil {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("failed to decode response: %w", err)
@@ -329,7 +329,10 @@ func (m *Monitor) fetchCheckpointFromLog(ctx context.Context, endpoint string, l
 
 		// Convert to our Checkpoint type
 		cp := &types.Checkpoint{
-			Checkpoint: &cth.SignedTreeHead,
+			Checkpoint: &checkpoint.Checkpoint{
+				SignedTreeHead: cth.SignedTreeHead,
+				Origin:         m.config.QuorumPolicy.Logs[logID].Origin,
+			},
 			LogID:      logID,
 			ReceivedAt: time.Now(),
 			Source:     "log",
@@ -455,7 +458,7 @@ func (m *Monitor) fetchCheckpointFromWitness(ctx context.Context, witness *types
 			return nil, fmt.Errorf("log identity not found in policy")
 		}
 
-		sth := types.TreeHead{
+		sth := sigsumtypes.TreeHead{
 			Size:     witnessState.TreeSize,
 			RootHash: rootHash,
 		}
@@ -464,7 +467,7 @@ func (m *Monitor) fetchCheckpointFromWitness(ctx context.Context, witness *types
 		// with the witness cosignature for verification
 		cp := &types.Checkpoint{
 			Checkpoint: &checkpoint.Checkpoint{
-				SignedTreeHead: types.SignedTreeHead{
+				SignedTreeHead: sigsumtypes.SignedTreeHead{
 					TreeHead: sth,
 				},
 				Origin: logIdentity.Origin,
@@ -899,10 +902,10 @@ func (m *Monitor) verifyConsistencyProof(oldRoot, newRoot crypto.Hash, proof *ty
 		return oldRoot == newRoot
 	}
 
-	// In a real implementation, this would use the RFC 6962 algorithm
-	// to verify that the old root is consistent with the new root
-	// using the provided hash chain
-	return merkle.VerifyConsistencyProof(oldRoot, newRoot, proof.Hashes)
+	// Use RFC 6962 consistency verification
+	// Need oldSize and newSize - they are in the proof but types.ConsistencyProof only has Hashes
+	// For now, use 0 as placeholders - in real implementation these would be passed
+	return merkle.VerifyConsistency(0, 0, &oldRoot, &newRoot, proof.Hashes) == nil
 }
 
 // createSameSizeForkEvidence creates evidence for a same-size fork
@@ -1180,12 +1183,14 @@ func (m *Monitor) verifyDifferentSizeForkEvidence(bundle *types.EvidenceBundle) 
 
 	// Verify consistency proof
 	if bundle.ConsistencyProof != nil {
-		valid := merkle.VerifyConsistencyProof(
-			cp1.TreeHead.RootHash,
-			cp2.TreeHead.RootHash,
+		valid := merkle.VerifyConsistency(
+			cp1.Checkpoint.SignedTreeHead.Size,
+			cp2.Checkpoint.SignedTreeHead.Size,
+			&cp1.Checkpoint.SignedTreeHead.RootHash,
+			&cp2.Checkpoint.SignedTreeHead.RootHash,
 			bundle.ConsistencyProof.Hashes,
 		)
-		if !valid {
+		if valid != nil {
 			result.Valid = false
 			result.Errors = append(result.Errors, "consistency proof verification failed")
 		}

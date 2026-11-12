@@ -19,7 +19,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: '../cmd/witnessmesh/web/dist',
+    outDir: 'dist',
     emptyOutDir: true,
   },
 })

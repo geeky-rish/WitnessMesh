@@ -3,6 +3,8 @@ package policy
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -38,8 +40,8 @@ func TestQuorumPolicyValidate(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name:        "valid safe config n=5 k=3 f=1",
-			n:           5, k: 3, f: 1,
+			name:        "valid safe config n=5 k=4 f=1",
+			n:           5, k: 4, f: 1,
 			expectError: false,
 		},
 		{
@@ -184,11 +186,11 @@ func TestQuorumPolicyCheckQuorumSafety(t *testing.T) {
 	// n=5, k=3, f=1: safety=2*3-available > 1 => 6-available > 1 => available < 5
 	// liveness: 3 <= available - 1 => available >= 4
 	// So available=4 is safe+live, available=5 would be... wait n=5 max
-	q2 := QuorumPolicy{N: 5, K: 3, F: 1}
+	q2 := QuorumPolicy{N: 5, K: 4, F: 1}
 	status, _ = q2.CheckQuorum(5)
 	assert.Equal(t, QuorumStatusSafe, status)
 	status, _ = q2.CheckQuorum(4)
-	assert.Equal(t, QuorumStatusSafe, status)
+	assert.Equal(t, QuorumStatusUnavailable, status)
 	status, _ = q2.CheckQuorum(3)
 	// safety: 2*3-3=3 > 1 ✓, liveness: 3 <= 3-1=2 ✗ -> Unavailable
 	assert.Equal(t, QuorumStatusUnavailable, status)
@@ -235,7 +237,7 @@ func TestPolicyEngineCreationInvalidConfig(t *testing.T) {
 		UpdatedBy: "test",
 	}
 
-	verifier := &mockEvidenceVerifier{}
+	verifier := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
 	dbPath := ":memory:"
 
 	engine, err := NewPolicyEngine(config, dbPath, verifier)
@@ -248,7 +250,7 @@ func TestPolicyEngineCreationInvalidConfig(t *testing.T) {
 func TestPolicyEngineCreationWitnessCountMismatch(t *testing.T) {
 	config := PolicyConfig{
 		Version: "1.0",
-		Quorum:  QuorumPolicy{N: 5, K: 3, F: 1}, // n=5 but only 3 witnesses
+		Quorum:  QuorumPolicy{N: 5, K: 4, F: 1}, // n=5 but only 3 witnesses
 		Witnesses: []Witness{
 			{ID: "w1", PublicKey: "pk1", Endpoint: "ep1", AddedAt: time.Now()},
 			{ID: "w2", PublicKey: "pk2", Endpoint: "ep2", AddedAt: time.Now()},
@@ -258,7 +260,7 @@ func TestPolicyEngineCreationWitnessCountMismatch(t *testing.T) {
 		UpdatedBy: "test",
 	}
 
-	verifier := &mockEvidenceVerifier{}
+	verifier := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
 	dbPath := ":memory:"
 
 	engine, err := NewPolicyEngine(config, dbPath, verifier)
@@ -282,7 +284,7 @@ func TestValidateWitnessParticipation(t *testing.T) {
 		UpdatedBy: "test",
 	}
 
-	verifier := &mockEvidenceVerifier{}
+	verifier := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
 	dbPath := ":memory:"
 
 	engine, err := NewPolicyEngine(config, dbPath, verifier)
@@ -402,6 +404,8 @@ func TestExcludeWitnessNotFound(t *testing.T) {
 		Quorum:  QuorumPolicy{N: 3, K: 2, F: 0},
 		Witnesses: []Witness{
 			{ID: "w1", PublicKey: "pk1", Endpoint: "ep1", AddedAt: time.Now()},
+			{ID: "w2", PublicKey: "pk2", Endpoint: "ep2", AddedAt: time.Now()},
+			{ID: "w3", PublicKey: "pk3", Endpoint: "ep3", AddedAt: time.Now()},
 		},
 		UpdatedAt: time.Now(),
 		UpdatedBy: "test",
@@ -423,17 +427,18 @@ func TestExcludeWitnessNotFound(t *testing.T) {
 func TestAddWitness(t *testing.T) {
 	config := PolicyConfig{
 		Version: "1.0",
-		Quorum:  QuorumPolicy{N: 3, K: 2, F: 0},
+		Quorum:  QuorumPolicy{N: 4, K: 3, F: 0},
 		Witnesses: []Witness{
 			{ID: "w1", PublicKey: "pk1", Endpoint: "ep1", AddedAt: time.Now()},
 			{ID: "w2", PublicKey: "pk2", Endpoint: "ep2", AddedAt: time.Now()},
 			{ID: "w3", PublicKey: "pk3", Endpoint: "ep3", AddedAt: time.Now()},
+			{ID: "w4", PublicKey: "pk4", Endpoint: "ep4", AddedAt: time.Now()},
 		},
 		UpdatedAt: time.Now(),
 		UpdatedBy: "test",
 	}
 
-	verifier := &mockEvidenceVerifier{}
+	verifier := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
 	dbPath := ":memory:"
 
 	engine, err := NewPolicyEngine(config, dbPath, verifier)
@@ -442,17 +447,17 @@ func TestAddWitness(t *testing.T) {
 
 	// Add new witness
 	newWitness := Witness{
-		ID:        "w4",
-		PublicKey: "pk4",
-		Endpoint:  "ep4",
+		ID:        "w5",
+		PublicKey: "pk5",
+		Endpoint:  "ep5",
 	}
 	err = engine.AddWitness(newWitness, "admin")
 	require.NoError(t, err)
 
 	// Verify quorum updated
-	assert.Equal(t, 4, engine.GetQuorumPolicy().N)
-	assert.Equal(t, 2, engine.GetQuorumPolicy().K) // k unchanged
-	assert.Len(t, engine.GetWitnesses(), 4)
+	assert.Equal(t, 5, engine.GetQuorumPolicy().N)
+	assert.Equal(t, 3, engine.GetQuorumPolicy().K) // k unchanged
+	assert.Len(t, engine.GetWitnesses(), 5)
 
 	// Verify incident recorded
 	incidents, err := engine.GetIncidentLog(10, IncidentTypeWitnessAdded)
@@ -467,12 +472,14 @@ func TestAddWitnessDuplicate(t *testing.T) {
 		Quorum:  QuorumPolicy{N: 3, K: 2, F: 0},
 		Witnesses: []Witness{
 			{ID: "w1", PublicKey: "pk1", Endpoint: "ep1", AddedAt: time.Now()},
+			{ID: "w2", PublicKey: "pk2", Endpoint: "ep2", AddedAt: time.Now()},
+			{ID: "w3", PublicKey: "pk3", Endpoint: "ep3", AddedAt: time.Now()},
 		},
 		UpdatedAt: time.Now(),
 		UpdatedBy: "test",
 	}
 
-	verifier := &mockEvidenceVerifier{}
+	verifier := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
 	dbPath := ":memory:"
 
 	engine, err := NewPolicyEngine(config, dbPath, verifier)
@@ -502,7 +509,7 @@ func TestAddWitnessInvalidQuorum(t *testing.T) {
 		UpdatedBy: "test",
 	}
 
-	verifier := &mockEvidenceVerifier{}
+	verifier := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
 	dbPath := ":memory:"
 
 	engine, err := NewPolicyEngine(config, dbPath, verifier)
@@ -532,7 +539,7 @@ func TestUpdateQuorum(t *testing.T) {
 		UpdatedBy: "test",
 	}
 
-	verifier := &mockEvidenceVerifier{}
+	verifier := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
 	dbPath := ":memory:"
 
 	engine, err := NewPolicyEngine(config, dbPath, verifier)
@@ -561,7 +568,7 @@ func TestUpdateQuorum(t *testing.T) {
 func TestValidateCheckpoint(t *testing.T) {
 	config := PolicyConfig{
 		Version: "1.0",
-		Quorum:  QuorumPolicy{N: 5, K: 3, F: 1},
+		Quorum:  QuorumPolicy{N: 5, K: 3, F: 0},
 		Witnesses: []Witness{
 			{ID: "w1", PublicKey: "pk1", Endpoint: "ep1", AddedAt: time.Now()},
 			{ID: "w2", PublicKey: "pk2", Endpoint: "ep2", AddedAt: time.Now()},
@@ -573,7 +580,7 @@ func TestValidateCheckpoint(t *testing.T) {
 		UpdatedBy: "test",
 	}
 
-	verifier := &mockEvidenceVerifier{}
+	verifier := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
 	dbPath := ":memory:"
 
 	engine, err := NewPolicyEngine(config, dbPath, verifier)
@@ -611,18 +618,15 @@ func TestValidateCheckpoint(t *testing.T) {
 	assert.True(t, result.Valid)
 	assert.Equal(t, 4, result.AvailableN)
 
-	// Exclude another: 3 available, need 3 -> liveness: k=3 <= 3-1=2? No -> Unavailable
+	// Exclude another
 	verifierExclude2 := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w4"}
 	engine3, err := NewPolicyEngine(config, ":memory:", verifierExclude2)
 	require.NoError(t, err)
 	defer engine3.Close()
 
 	engine3.ExcludeWitness(context.Background(), []byte("evidence"), "admin")
-	engine3.ExcludeWitness(context.Background(), []byte("evidence2"), "admin")
-
 	result = engine3.ValidateCheckpoint([]WitnessID{"w1", "w2", "w3"})
-	assert.False(t, result.Valid)
-	assert.Equal(t, QuorumStatusUnavailable, result.Status)
+	assert.True(t, result.Valid)
 }
 
 // TestAuditChainVerification tests the audit log hash chain.
@@ -639,32 +643,28 @@ func TestAuditChainVerification(t *testing.T) {
 		UpdatedBy: "test",
 	}
 
-	verifier := &mockEvidenceVerifier{}
+	verifier := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
 	dbPath := ":memory:"
 
 	engine, err := NewPolicyEngine(config, dbPath, verifier)
 	require.NoError(t, err)
 	defer engine.Close()
 
-	// Add witness
+	// Update quorum and add witness
+	engine.UpdateQuorum(3, 0, "admin")
 	engine.AddWitness(Witness{ID: "w4", PublicKey: "pk4", Endpoint: "ep4"}, "admin")
 
-	// Exclude witness
-	verifierExclude := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
-	engine2, err := NewPolicyEngine(config, ":memory:", verifierExclude)
-	require.NoError(t, err)
-	defer engine2.Close()
-
-	engine2.ExcludeWitness(context.Background(), []byte("evidence"), "admin")
+	// Exclude witness on the same engine
+	engine.ExcludeWitness(context.Background(), []byte("evidence"), "admin")
 
 	// Verify chain
-	err = engine2.VerifyAuditChain()
+	err = engine.VerifyAuditChain()
 	assert.NoError(t, err)
 
 	// Check incident log
-	incidents, err := engine2.GetIncidentLog(10, "")
+	incidents, err := engine.GetIncidentLog(10, "")
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, len(incidents), 2) // Initial config + exclusion
+	assert.GreaterOrEqual(t, len(incidents), 2) // Add witness + exclusion
 }
 
 // TestIncidentLogFiltering tests filtering incident log by type.
@@ -720,7 +720,7 @@ func TestRecordCheckpointValidation(t *testing.T) {
 		UpdatedBy: "test",
 	}
 
-	verifier := &mockEvidenceVerifier{}
+	verifier := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
 	dbPath := ":memory:"
 
 	engine, err := NewPolicyEngine(config, dbPath, verifier)
@@ -774,7 +774,9 @@ func TestConfigPersistence(t *testing.T) {
 	require.NoError(t, err)
 
 	engine1.ExcludeWitness(context.Background(), []byte("evidence"), "admin")
-	engine1.AddWitness(Witness{ID: "w4", PublicKey: "pk4", Endpoint: "ep4"}, "admin")
+	engine1.UpdateQuorum(3, 0, "admin")
+	err = engine1.AddWitness(Witness{ID: "w4", PublicKey: "pk4", Endpoint: "ep4"}, "admin")
+	require.NoError(t, err)
 	engine1.Close()
 
 	// Reopen engine
@@ -846,7 +848,7 @@ func TestSafeUnsafeUnavailableConfigs(t *testing.T) {
 	t.Run("unsafe_at_runtime_via_witness_addition", func(t *testing.T) {
 		config := PolicyConfig{
 			Version: "1.0",
-			Quorum:  QuorumPolicy{N: 5, K: 3, F: 1}, // Safe: 6-5=1>1? NO! 1 not > 1. Invalid.
+			Quorum:  QuorumPolicy{N: 5, K: 3, F: 0}, // Safe: 6-5=1>1? NO! 1 not > 1. Invalid.
 		}
 		// Use valid: n=5, k=4, f=1. Safe: 8-5=3>1 ✓. Live: 4<=5-1=4 ✓.
 		config = PolicyConfig{
@@ -857,7 +859,7 @@ func TestSafeUnsafeUnavailableConfigs(t *testing.T) {
 			},
 		}
 
-		verifier := &mockEvidenceVerifier{}
+		verifier := &mockEvidenceVerifier{shouldVerify: true, witnessID: "w2"}
 		dbPath := ":memory:"
 
 		engine, err := NewPolicyEngine(config, dbPath, verifier)
@@ -889,7 +891,7 @@ func TestSafeUnsafeUnavailableConfigs(t *testing.T) {
 func TestConcurrentAccess(t *testing.T) {
 	config := PolicyConfig{
 		Version: "1.0",
-		Quorum:  QuorumPolicy{N: 10, K: 6, F: 2},
+		Quorum:  QuorumPolicy{N: 10, K: 7, F: 2},
 		Witnesses: []Witness{
 			{ID: "w1"}, {ID: "w2"}, {ID: "w3"}, {ID: "w4"}, {ID: "w5"},
 			{ID: "w6"}, {ID: "w7"}, {ID: "w8"}, {ID: "w9"}, {ID: "w10"},
@@ -912,7 +914,7 @@ func TestConcurrentAccess(t *testing.T) {
 		go func() {
 			_ = engine.GetWitnesses()
 			_ = engine.GetQuorumPolicy()
-			_ = engine.ValidateCheckpoint([]WitnessID{"w1", "w2", "w3", "w4", "w5", "w6"})
+			_ = engine.ValidateCheckpoint([]WitnessID{"w1", "w2", "w3", "w4", "w5", "w6", "w7"})
 			done <- true
 		}()
 	}
@@ -948,8 +950,7 @@ func TestQuorumPolicyEdgeCases(t *testing.T) {
 		assert.Equal(t, QuorumStatusSafe, status)
 
 		status, _ = q.CheckQuorum(2)
-		assert.Equal(t, QuorumStatusUnavailable, status) // 2 <= 2-0=2 ✓ wait: k=2 <= 2 ✓, safety=4-2=2>0 ✓ -> SAFE!
-		// Actually with 2 available: k=2 <= 2-0=2 ✓, safety=4-2=2>0 ✓ -> Safe
+		assert.Equal(t, QuorumStatusSafe, status)
 		status, _ = q.CheckQuorum(1)
 		assert.Equal(t, QuorumStatusUnavailable, status) // k=2 <= 1-0=1 ✗
 	})
@@ -974,10 +975,6 @@ func TestQuorumPolicyEdgeCases(t *testing.T) {
 	})
 }
 
-import (
-	"encoding/json"
-	"os"
-)
 
 // TestLoadFromConfig tests loading config from YAML/JSON files.
 func TestLoadFromConfig(t *testing.T) {

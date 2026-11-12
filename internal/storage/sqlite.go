@@ -7,12 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"witnessmesh/internal/types"
-
-	"github.com/mattn/go-sqlite3"
-	"sigsum.org/sigsum-go/pkg/checkpoint"
 	"sigsum.org/sigsum-go/pkg/crypto"
-	"sigsum.org/sigsum-go/pkg/types"
+
+	"witnessmesh/internal/types"
 )
 
 const schema = `
@@ -138,7 +135,7 @@ func (s *SQLiteStore) SaveCheckpoint(cp *types.Checkpoint) (int64, error) {
 	treeSize := cp.TreeHead.Size
 	rootHash := cp.TreeHead.RootHash[:]
 	signature := cp.Signature[:]
-	keyID := cp.KeyId
+	keyID := cp.KeyId[:]
 
 	result, err := s.db.Exec(`
 		INSERT OR IGNORE INTO checkpoints
@@ -156,8 +153,9 @@ func (s *SQLiteStore) SaveCheckpoint(cp *types.Checkpoint) (int64, error) {
 		return 0, fmt.Errorf("failed to get checkpoint ID: %w", err)
 	}
 
-	// If checkpoint already existed, get its ID
-	if id == 0 {
+	rowsAffected, _ := result.RowsAffected()
+	// If checkpoint already existed, get its actual ID
+	if rowsAffected == 0 || id == 0 {
 		err = s.db.QueryRow(`
 			SELECT id FROM checkpoints
 			WHERE log_id = ? AND tree_size = ? AND root_hash = ?`,
@@ -348,11 +346,12 @@ func (s *SQLiteStore) GetIncidents(logID crypto.Hash, limit int) ([]types.Incide
 // SaveEvidenceBundle saves an evidence bundle
 func (s *SQLiteStore) SaveEvidenceBundle(bundle *types.EvidenceBundle) error {
 	// For now, just store basic info
+	logID := bundle.LogIdentity.PublicKey.Hash()
 	_, err := s.db.Exec(`
 		INSERT OR REPLACE INTO evidence_bundles
 		(bundle_id, version, log_id, case_type, checkpoints_blob, cosignatures_blob, consistency_proof_blob, detection_time, detector_id, metadata_blob)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		bundle.Metadata["bundle_id"], bundle.Version, bundle.LogIdentity.PublicKey.Hash()[:],
+		bundle.Metadata["bundle_id"], bundle.Version, logID[:],
 		bundle.Case, []byte("checkpoints"), []byte("cosignatures"), []byte("proof"),
 		bundle.DetectionTime, bundle.DetectorID, []byte("metadata"))
 	return err

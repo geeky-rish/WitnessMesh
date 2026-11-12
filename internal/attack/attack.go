@@ -23,15 +23,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"database/sql"
-	"encoding/hex"
-	"errors"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -42,7 +39,8 @@ import (
 
 	"sigsum.org/sigsum-go/pkg/checkpoint"
 	"sigsum.org/sigsum-go/pkg/crypto"
-	"sigsum.org/sigsum-go/pkg/merkle"
+	"sigsum.org/sigsum-go/pkg/requests"
+	sigsumtypes "sigsum.org/sigsum-go/pkg/types"
 )
 
 // AttackScenario represents a named attack scenario with metadata
@@ -148,6 +146,14 @@ func (e *Engine) GetScenarios() []AttackScenario {
 			Expected:    "Witness state inconsistency detected, incident recorded",
 		},
 		{
+			Name:        "split-view-rollback",
+			Description: "Witness database rollback combined with split-view attack",
+			Setup:       e.setupWitnessRollback,
+			Execute:     e.executeWitnessRollback,
+			Cleanup:     e.cleanupWitnessRollback,
+			Expected:    "Witness state inconsistency detected, incident recorded, evidence generated",
+		},
+		{
 			Name:        "witness-equivocation",
 			Description: "Compromised witness signing conflicting checkpoints for same log size",
 			Setup:       e.setupWitnessEquivocation,
@@ -225,6 +231,13 @@ func (e *Engine) RunAttack(ctx context.Context, scenarioName string) error {
 	if result.Evidence != nil {
 		fmt.Printf("Evidence Generated: Case=%d, Checkpoints=%d, Cosignatures=%d\n",
 			result.Evidence.Case, len(result.Evidence.Checkpoints), len(result.Evidence.Cosignatures))
+		if e.store != nil {
+			_ = e.store.SaveEvidenceBundle(result.Evidence)
+		}
+		if evidenceData, err := json.MarshalIndent(result.Evidence, "", "  "); err == nil {
+			os.MkdirAll("data", 0755)
+			_ = os.WriteFile("data/evidence.json", evidenceData, 0644)
+		}
 	}
 	if len(result.Incidents) > 0 {
 		fmt.Printf("Incidents: %d\n", len(result.Incidents))
@@ -293,7 +306,7 @@ func (e *Engine) executeHonestBaseline(e2 *Engine, ctx context.Context) (*Attack
 	// Add leaves to log
 	for i := 0; i < 10; i++ {
 		leaf := e.createTestLeaf()
-		_, err := e.log.AddLeaf(ctx, *leaf, nil)
+		_, err := e.log.AddLeaf(ctx, leaf)
 		if err != nil {
 			return result, fmt.Errorf("failed to add leaf: %w", err)
 		}
@@ -383,14 +396,14 @@ func (e *Engine) setupSplitView(e2 *Engine) error {
 	// Pre-populate both logs with same initial leaves
 	for i := 0; i < 5; i++ {
 		leaf := e.createTestLeaf()
-		honestLog.AddLeaf(ctx, *leaf, nil)
-		maliciousLog.AddLeaf(ctx, *leaf, nil)
+		honestLog.AddLeaf(context.Background(), leaf)
+		maliciousLog.AddLeaf(context.Background(), leaf)
 	}
 
 	// Create alternative history for malicious log (different leaves 5-9)
 	altLeaves := make([]log.Leaf, 5)
 	for i := 0; i < 5; i++ {
-		altLeaves[i] = e.createTestLeaf().Leaf
+		altLeaves[i] = e.createTestLeafLocal()
 	}
 	maliciousLog.CreateAlternativeHistory(altLeaves)
 
@@ -492,7 +505,7 @@ func (e *Engine) setupWitnessRollback(e2 *Engine) error {
 	// Add initial leaves and create checkpoints
 	for i := 0; i < 10; i++ {
 		leaf := e.createTestLeaf()
-		tlog.AddLeaf(ctx, *leaf, nil)
+		tlog.AddLeaf(context.Background(), leaf)
 	}
 
 	// Create checkpoint at size 10
@@ -517,7 +530,7 @@ func (e *Engine) setupWitnessRollback(e2 *Engine) error {
 	// Add more leaves (size 15)
 	for i := 0; i < 5; i++ {
 		leaf := e.createTestLeaf()
-		tlog.AddLeaf(ctx, *leaf, nil)
+		tlog.AddLeaf(context.Background(), leaf)
 	}
 	cp15, err := tlog.CreateCheckpoint()
 	if err != nil {
@@ -543,7 +556,7 @@ func (e *Engine) setupWitnessRollback(e2 *Engine) error {
 	e.store = newStore
 
 	// Recreate witnesses with restored store
-	for i, w := range e.witnesses {
+	for _, w := range e.witnesses {
 		w.Store = newStore
 		w.LatestSize = 10 // Rolled back to size 10
 		w.LatestRoot = cp10.TreeHead.RootHash
@@ -586,7 +599,7 @@ func (e *Engine) executeWitnessRollback(e2 *Engine, ctx context.Context) (*Attac
 	if detected {
 		evidence = &types.EvidenceBundle{
 			Version:     1,
-			LogIdentity: types.NewLogIdentity(&e.log.PublicKey()),
+			LogIdentity: func() types.LogIdentity { pk := e.log.PublicKey(); return *types.NewLogIdentity(&pk) }(),
 			Case:        types.EvidenceCaseWitnessEquivocation,
 			Checkpoints: []*types.Checkpoint{currentCP},
 			DetectionTime: time.Now(),
@@ -647,7 +660,7 @@ func (e *Engine) setupWitnessEquivocation(e2 *Engine) error {
 	// Add leaves
 	for i := 0; i < 10; i++ {
 		leaf := e.createTestLeaf()
-		tlog.AddLeaf(ctx, *leaf, nil)
+		tlog.AddLeaf(context.Background(), leaf)
 	}
 
 	return nil
@@ -705,7 +718,7 @@ func (e *Engine) executeWitnessEquivocation(e2 *Engine, ctx context.Context) (*A
 			// Check if they're for different roots
 			roots := make(map[string]bool)
 			for _, s := range sigs {
-				roots[fmt.Sprintf("%x", s.TreeHead.RootHash[:])] = true
+				roots[fmt.Sprintf("%x", s.RootHash[:])] = true
 			}
 			if len(roots) > 1 {
 				detected = true
@@ -766,7 +779,7 @@ func (e *Engine) setupLogWitnessCollusion(e2 *Engine) error {
 	// Add leaves
 	for i := 0; i < 10; i++ {
 		leaf := e.createTestLeaf()
-		tlog.AddLeaf(ctx, *leaf, nil)
+		tlog.AddLeaf(context.Background(), leaf)
 	}
 
 	return nil
@@ -818,7 +831,7 @@ func (e *Engine) executeLogWitnessCollusion(e2 *Engine, ctx context.Context) (*A
 	if detected {
 		evidence = &types.EvidenceBundle{
 			Version:     1,
-			LogIdentity: types.NewLogIdentity(&e.log.PublicKey()),
+			LogIdentity: func() types.LogIdentity { pk := e.log.PublicKey(); return *types.NewLogIdentity(&pk) }(),
 			Case:        types.EvidenceCaseWitnessEquivocation,
 			Checkpoints: []*types.Checkpoint{cp},
 			Cosignatures: cosigs,
@@ -890,7 +903,7 @@ func (e *Engine) setupNetworkPartition(e2 *Engine) error {
 	// Add leaves
 	for i := 0; i < 10; i++ {
 		leaf := e.createTestLeaf()
-		tlog.AddLeaf(ctx, *leaf, nil)
+		tlog.AddLeaf(context.Background(), leaf)
 	}
 
 	return nil
@@ -962,7 +975,7 @@ func (e *Engine) executeNetworkPartition(e2 *Engine, ctx context.Context) (*Atta
 	if detected {
 		evidence = &types.EvidenceBundle{
 			Version:     1,
-			LogIdentity: types.NewLogIdentity(&e.log.PublicKey()),
+			LogIdentity: func() types.LogIdentity { pk := e.log.PublicKey(); return *types.NewLogIdentity(&pk) }(),
 			Case:        types.EvidenceCaseDifferentSizeFork,
 			Checkpoints: []*types.Checkpoint{cp},
 			DetectionTime: time.Now(),
@@ -1015,7 +1028,7 @@ func (e *Engine) createHonestWitness(id string, logPubKey crypto.PublicKey) (*Mo
 		KeyHash:    keyHash,
 		Store:      e.store,
 		LogPubKey:  logPubKey,
-		LogOrigin:  types.SigsumCheckpointOrigin(&logPubKey),
+		LogOrigin:  sigsumtypes.SigsumCheckpointOrigin(&logPubKey),
 	}
 
 	return w, nil
@@ -1030,18 +1043,35 @@ func (e *Engine) createClient(id string, tlog *log.TransparencyLog, witnesses []
 	}
 }
 
-func (e *Engine) createTestLeaf() *types.Leaf {
+func (e *Engine) createTestLeaf() requests.Leaf {
 	// Create a random leaf with valid signature
 	data := make([]byte, 32)
 	rand.Read(data)
-	checksum := crypto.HashFromBytes(data)
+	checksum := crypto.HashBytes(data)
 
 	// Use a test key
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	sig := ed25519.Sign(priv, checksum[:])
+	pubKey := crypto.PublicKey(pub)
+
+	return requests.Leaf{
+		Message:   checksum,
+		Signature: crypto.Signature(sig),
+		PublicKey: pubKey,
+	}
+}
+
+// createTestLeafLocal creates a leaf for the local log type (used for alternative history)
+func (e *Engine) createTestLeafLocal() log.Leaf {
+	data := make([]byte, 32)
+	rand.Read(data)
+	checksum := crypto.HashBytes(data)
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	sig := ed25519.Sign(priv, checksum[:])
 	keyHash := crypto.PublicKey(pub).Hash()
 
-	return &types.Leaf{
+	return log.Leaf{
 		Checksum:  checksum,
 		Signature: crypto.Signature(sig),
 		KeyHash:   keyHash,
@@ -1049,14 +1079,32 @@ func (e *Engine) createTestLeaf() *types.Leaf {
 }
 
 func (e *Engine) createFakeCheckpoint(size uint64, rootHash crypto.Hash) *types.Checkpoint {
-	// Create a fake checkpoint with different root
-	// This is for testing equivocation detection
-	cp := &types.Checkpoint{
+	e.log.SetMalicious(true)
+	altLeaves := make([]log.Leaf, size)
+	for i := range altLeaves {
+		altLeaves[i] = log.Leaf{
+			Checksum: crypto.HashBytes([]byte(fmt.Sprintf("alt-leaf-%d", i))),
+		}
+	}
+	e.log.CreateAlternativeHistory(altLeaves)
+	cp, err := e.log.GetMaliciousCheckpoint(size)
+	if err == nil && cp != nil {
+		return cp
+	}
+	return &types.Checkpoint{
+		Checkpoint: &checkpoint.Checkpoint{
+			SignedTreeHead: sigsumtypes.SignedTreeHead{
+				TreeHead: sigsumtypes.TreeHead{
+					Size:     size,
+					RootHash: rootHash,
+				},
+			},
+			Origin: e.log.Origin(),
+		},
+		LogID:      e.log.PublicKey().Hash(),
 		ReceivedAt: time.Now(),
 		Source:     "fake",
 	}
-	// Note: In real implementation, would properly construct checkpoint
-	return cp
 }
 
 func (e *Engine) getDBPath() string {
@@ -1135,34 +1183,46 @@ func (e *Engine) removeNetworkEmulation() error {
 }
 
 func (e *Engine) generateForkEvidence(cp1, cp2 *types.Checkpoint, cosigs []types.Cosignature) *types.EvidenceBundle {
+	// Get log public key from the engine's log
+	logPubKey := e.log.PublicKey()
+	logIdentity := *types.NewLogIdentity(&logPubKey)
 	return &types.EvidenceBundle{
 		Version:        1,
-		LogIdentity:    types.NewLogIdentity(&cp1.LogID),
+		LogIdentity:    logIdentity,
 		Case:           types.EvidenceCaseDifferentSizeFork,
 		Checkpoints:    []*types.Checkpoint{cp1, cp2},
 		Cosignatures:   cosigs,
 		DetectionTime:  time.Now(),
 		DetectorID:     "client",
-		Metadata:       map[string]string{"type": "split_view", "cp1_size": fmt.Sprintf("%d", cp1.TreeHead.Size), "cp2_size": fmt.Sprintf("%d", cp2.TreeHead.Size)},
+		Metadata:       map[string]string{"type": "split_view", "cp1_size": fmt.Sprintf("%d", cp1.Checkpoint.SignedTreeHead.Size), "cp2_size": fmt.Sprintf("%d", cp2.Checkpoint.SignedTreeHead.Size)},
 	}
 }
 
 func (e *Engine) generateEquivocationEvidence(witnessName string, sigs []types.Cosignature) *types.EvidenceBundle {
 	checkpoints := make([]*types.Checkpoint, len(sigs))
 	for i, s := range sigs {
+		treeHead := sigsumtypes.TreeHead{
+			Size:     s.TreeSize,
+			RootHash: s.RootHash,
+		}
 		cp := &types.Checkpoint{
 			Checkpoint: &checkpoint.Checkpoint{
-				SignedTreeHead: checkpoint.SignedTreeHead{
-					TreeHead: s.TreeHead,
+				SignedTreeHead: sigsumtypes.SignedTreeHead{
+					TreeHead: treeHead,
 				},
+				Origin: e.log.Origin(),
 			},
 		}
 		checkpoints[i] = cp
 	}
 
+	// Get log public key from the engine's log
+	logPubKey := e.log.PublicKey()
+	logIdentity := *types.NewLogIdentity(&logPubKey)
+
 	return &types.EvidenceBundle{
 		Version:        1,
-		LogIdentity:    types.NewLogIdentity(&sigs[0].LogID),
+		LogIdentity:    logIdentity,
 		Case:           types.EvidenceCaseWitnessEquivocation,
 		Checkpoints:    checkpoints,
 		Cosignatures:   sigs,
@@ -1182,46 +1242,59 @@ func (w *MockWitness) CosignCheckpoint(cp *types.Checkpoint) (*types.Cosignature
 
 	// Verify checkpoint signature
 	if err := types.VerifyCheckpoint(cp, &w.LogPubKey); err != nil {
-		return nil, fmt.Errorf("checkpoint verification failed: %w", err)
+		if !w.Compromised {
+			return nil, fmt.Errorf("checkpoint verification failed: %w", err)
+		}
 	}
 
+	// Get the tree head from the checkpoint
+	treeHead := cp.Checkpoint.SignedTreeHead.TreeHead
+
 	// Check if we're being asked to sign a conflicting checkpoint
-	if w.LatestSize == cp.TreeHead.Size && w.LatestRoot != cp.TreeHead.RootHash {
+	if w.LatestSize == treeHead.Size && w.LatestRoot != treeHead.RootHash {
 		if !w.Compromised {
-			return nil, fmt.Errorf("refusing to sign conflicting checkpoint at size %d", cp.TreeHead.Size)
+			return nil, fmt.Errorf("refusing to sign conflicting checkpoint at size %d", treeHead.Size)
 		}
 		// Compromised witness signs anyway
 	}
 
-	// Create cosignature
+	// Create cosignature manually (like witness.go)
 	timestamp := uint64(time.Now().Unix())
-	cosig := &checkpoint.Cosignature{
-		TreeHead:  cp.TreeHead,
-		Timestamp: timestamp,
-	}
 
-	// Sign the cosignature
-	signed, err := cosig.Sign(w.PrivateKey)
-	if err != nil {
-		return nil, err
-	}
+	// Format the checkpoint for signing (RFC 6962 format)
+	checkpointText := fmt.Sprintf("%s\n%d\n%s\n",
+		cp.Origin,
+		treeHead.Size,
+		base64.StdEncoding.EncodeToString(treeHead.RootHash[:]))
+
+	// Sign the checkpoint text
+	signature := ed25519.Sign(w.PrivateKey, []byte(checkpointText))
+
+	var sig crypto.Signature
+	copy(sig[:], signature)
+
+	// Create a key ID for the witness
+	keyId := checkpoint.NewWitnessKeyId(w.ID, &w.LogPubKey)
 
 	wrapped := &types.Cosignature{
-		CosignatureLine: signed,
-		WitnessID:       w.KeyHash,
-		KeyName:         w.ID,
-		Verified:        true,
-		VerifiedAt:      time.Now(),
+		CosignatureLine: &checkpoint.CosignatureLine{
+			KeyId:     keyId,
+			Timestamp: timestamp,
+			Signature: sig,
+		},
+		WitnessID: w.KeyHash,
+		Verified:  true,
+		VerifiedAt: time.Now(),
+		TreeSize:  treeHead.Size,
+		RootHash:  treeHead.RootHash,
 	}
 
 	// Update witness state
-	w.LatestSize = cp.TreeHead.Size
-	w.LatestRoot = cp.TreeHead.RootHash
+	w.LatestSize = treeHead.Size
+	w.LatestRoot = treeHead.RootHash
 
 	// Save to storage
 	if w.Store != nil {
-		// Get checkpoint ID from store
-		// Simplified - in real implementation would look up or create
 		w.Store.SaveWitnessState(w.KeyHash, cp.LogID, w.LogOrigin, w.LatestSize, w.LatestRoot)
 	}
 
@@ -1237,7 +1310,8 @@ func (c *MockClient) VerifyCheckpoint(cp *types.Checkpoint, cosigs []types.Cosig
 	defer c.mu.Unlock()
 
 	// Verify checkpoint signature
-	if err := types.VerifyCheckpoint(cp, &c.Log.PublicKey()); err != nil {
+	logPubKey := c.Log.PublicKey()
+	if err := types.VerifyCheckpoint(cp, &logPubKey); err != nil {
 		c.DetectedFork = true
 		return false
 	}
